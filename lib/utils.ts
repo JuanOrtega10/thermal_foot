@@ -198,3 +198,260 @@ export function segmentFootKMeans(
   return cleanMaskKMeans(mask, rows, cols);
 }
 
+// ==================== ROI Calibration System ====================
+
+export interface NormalizedROI {
+  // Coordenadas normalizadas relativas al bounding box (0-1)
+  minRowNorm: number;  // 0 = top del bounding box, 1 = bottom
+  maxRowNorm: number;
+  minColNorm: number;  // 0 = left del bounding box, 1 = right
+  maxColNorm: number;
+  // Offset relativo al centro de masa (para ajuste fino)
+  centerMassOffsetRow: number;  // En píxeles relativos
+  centerMassOffsetCol: number;
+}
+
+export interface ROICalibration {
+  hallux: NormalizedROI;
+  firstMetatarsal: NormalizedROI;
+  heel: NormalizedROI;
+  // Metadata de la calibración
+  calibratedOn: {
+    footSide: 'izquierdo' | 'derecho';
+    footHeight: number;
+    footWidth: number;
+    centerMass: { row: number; col: number };
+  };
+}
+
+export interface ROISelection {
+  minRow: number;
+  maxRow: number;
+  minCol: number;
+  maxCol: number;
+}
+
+export interface FootROIs {
+  hallux: boolean[];           // Máscara para hallux
+  firstMetatarsal: boolean[]; // Máscara para primer metatarsiano
+  heel: boolean[];            // Máscara para talón
+  boundingBox: {
+    minRow: number;
+    maxRow: number;
+    minCol: number;
+    maxCol: number;
+  };
+}
+
+/**
+ * Calcula el bounding box del pie segmentado
+ */
+export function getFootBoundingBox(
+  footMask: boolean[],
+  rows: number,
+  cols: number
+): { minRow: number; maxRow: number; minCol: number; maxCol: number } | null {
+  let minRow = rows, maxRow = -1;
+  let minCol = cols, maxCol = -1;
+  let found = false;
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const idx = row * cols + col;
+      if (footMask[idx]) {
+        found = true;
+        if (row < minRow) minRow = row;
+        if (row > maxRow) maxRow = row;
+        if (col < minCol) minCol = col;
+        if (col > maxCol) maxCol = col;
+      }
+    }
+  }
+
+  if (!found) return null;
+  return { minRow, maxRow, minCol, maxCol };
+}
+
+/**
+ * Calcula el centro de masa del pie
+ */
+export function getFootCenterOfMass(
+  footMask: boolean[],
+  rows: number,
+  cols: number
+): { row: number; col: number } | null {
+  let sumRow = 0, sumCol = 0, count = 0;
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const idx = row * cols + col;
+      if (footMask[idx]) {
+        sumRow += row;
+        sumCol += col;
+        count++;
+      }
+    }
+  }
+
+  if (count === 0) return null;
+  return { row: sumRow / count, col: sumCol / count };
+}
+
+/**
+ * Normaliza coordenadas de píxeles a coordenadas relativas (0-1)
+ */
+export function normalizeCoordinates(
+  pixelCoords: ROISelection,
+  bbox: { minRow: number; maxRow: number; minCol: number; maxCol: number },
+  centerMass: { row: number; col: number }
+): NormalizedROI {
+  const footHeight = bbox.maxRow - bbox.minRow + 1;
+  const footWidth = bbox.maxCol - bbox.minCol + 1;
+
+  const centerRow = (pixelCoords.minRow + pixelCoords.maxRow) / 2;
+  const centerCol = (pixelCoords.minCol + pixelCoords.maxCol) / 2;
+
+  return {
+    // Normalizar al bounding box (0-1)
+    minRowNorm: (pixelCoords.minRow - bbox.minRow) / footHeight,
+    maxRowNorm: (pixelCoords.maxRow - bbox.minRow) / footHeight,
+    minColNorm: (pixelCoords.minCol - bbox.minCol) / footWidth,
+    maxColNorm: (pixelCoords.maxCol - bbox.minCol) / footWidth,
+    // Offset relativo al centro de masa (normalizado)
+    centerMassOffsetRow: centerRow - centerMass.row,
+    centerMassOffsetCol: centerCol - centerMass.col,
+  };
+}
+
+/**
+ * Desnormaliza coordenadas relativas a píxeles absolutos
+ */
+export function denormalizeCoordinates(
+  normalizedROI: NormalizedROI,
+  bbox: { minRow: number; maxRow: number; minCol: number; maxCol: number },
+  centerMass: { row: number; col: number }
+): ROISelection {
+  const footHeight = bbox.maxRow - bbox.minRow + 1;
+  const footWidth = bbox.maxCol - bbox.minCol + 1;
+
+  // Calcular centro de la ROI usando offset del centro de masa
+  const centerRow = centerMass.row + normalizedROI.centerMassOffsetRow;
+  const centerCol = centerMass.col + normalizedROI.centerMassOffsetCol;
+
+  // Calcular tamaño de la ROI
+  const roiHeight = (normalizedROI.maxRowNorm - normalizedROI.minRowNorm) * footHeight;
+  const roiWidth = (normalizedROI.maxColNorm - normalizedROI.minColNorm) * footWidth;
+
+  // Calcular límites absolutos
+  const minRow = Math.max(bbox.minRow, Math.floor(centerRow - roiHeight / 2));
+  const maxRow = Math.min(bbox.maxRow, Math.floor(centerRow + roiHeight / 2));
+  const minCol = Math.max(bbox.minCol, Math.floor(centerCol - roiWidth / 2));
+  const maxCol = Math.min(bbox.maxCol, Math.floor(centerCol + roiWidth / 2));
+
+  return { minRow, maxRow, minCol, maxCol };
+}
+
+/**
+ * Aplica la calibración guardada a un nuevo pie
+ */
+export function applyROICalibration(
+  footMask: boolean[],
+  rows: number,
+  cols: number,
+  footSide: 'izquierdo' | 'derecho',
+  calibration?: ROICalibration
+): FootROIs | null {
+  // Cargar calibración si no se proporciona
+  if (!calibration) {
+    const saved = localStorage.getItem('roiCalibration');
+    if (!saved) return null;
+    try {
+      const parsed = JSON.parse(saved);
+      calibration = parsed as ROICalibration;
+    } catch (e) {
+      console.error('Error parsing ROI calibration:', e);
+      return null;
+    }
+  }
+
+  if (!calibration) return null;
+
+  const bbox = getFootBoundingBox(footMask, rows, cols);
+  const centerMass = getFootCenterOfMass(footMask, rows, cols);
+  
+  if (!bbox || !centerMass) return null;
+
+  // Desnormalizar cada ROI
+  const halluxCoords = denormalizeCoordinates(calibration.hallux, bbox, centerMass);
+  const metatarsalCoords = denormalizeCoordinates(calibration.firstMetatarsal, bbox, centerMass);
+  const heelCoords = denormalizeCoordinates(calibration.heel, bbox, centerMass);
+
+  // Crear máscaras
+  const halluxMask = new Array<boolean>(rows * cols).fill(false);
+  const firstMetatarsalMask = new Array<boolean>(rows * cols).fill(false);
+  const heelMask = new Array<boolean>(rows * cols).fill(false);
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const idx = row * cols + col;
+      if (!footMask[idx]) continue;
+
+      if (row >= halluxCoords.minRow && row <= halluxCoords.maxRow &&
+          col >= halluxCoords.minCol && col <= halluxCoords.maxCol) {
+        halluxMask[idx] = true;
+      }
+
+      if (row >= metatarsalCoords.minRow && row <= metatarsalCoords.maxRow &&
+          col >= metatarsalCoords.minCol && col <= metatarsalCoords.maxCol) {
+        firstMetatarsalMask[idx] = true;
+      }
+
+      if (row >= heelCoords.minRow && row <= heelCoords.maxRow &&
+          col >= heelCoords.minCol && col <= heelCoords.maxCol) {
+        heelMask[idx] = true;
+      }
+    }
+  }
+
+  return {
+    hallux: halluxMask,
+    firstMetatarsal: firstMetatarsalMask,
+    heel: heelMask,
+    boundingBox: bbox,
+  };
+}
+
+/**
+ * Calcula estadísticas de temperatura para una ROI específica
+ */
+export function getROIStats(
+  data: number[],
+  roiMask: boolean[],
+  rows: number,
+  cols: number
+): { min: number; max: number; avg: number; count: number } | null {
+  const temps: number[] = [];
+  
+  for (let i = 0; i < data.length; i++) {
+    if (roiMask[i]) {
+      temps.push(data[i]);
+    }
+  }
+
+  if (temps.length === 0) return null;
+
+  let min = temps[0], max = temps[0], sum = 0;
+  for (const temp of temps) {
+    if (temp < min) min = temp;
+    if (temp > max) max = temp;
+    sum += temp;
+  }
+
+  return {
+    min,
+    max,
+    avg: sum / temps.length,
+    count: temps.length
+  };
+}
+

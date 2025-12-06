@@ -1,7 +1,17 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { temperatureToColor, calculateStats, segmentFootKMeans } from '@/lib/utils';
+import { 
+  temperatureToColor, 
+  calculateStats, 
+  segmentFootKMeans,
+  getFootBoundingBox,
+  getFootCenterOfMass,
+  normalizeCoordinates,
+  applyROICalibration,
+  type ROICalibration,
+  type ROISelection
+} from '@/lib/utils';
 
 interface ThermalData {
   rows: number;
@@ -16,8 +26,241 @@ interface Stats {
   avg: number;
 }
 
+// Componente para calibración de ROIs
+function ROICalibrationCanvas({ 
+  data, 
+  tempRange, 
+  footSide,
+  onCalibrationComplete,
+  onCancel
+}: { 
+  data: ThermalData; 
+  tempRange: { min: number; max: number };
+  footSide: 'izquierdo' | 'derecho';
+  onCalibrationComplete: (calibration: ROICalibration) => void;
+  onCancel: () => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [currentROI, setCurrentROI] = useState<keyof Omit<ROICalibration, 'calibratedOn'> | null>(null);
+  const [selections, setSelections] = useState<{
+    hallux?: ROISelection;
+    firstMetatarsal?: ROISelection;
+    heel?: ROISelection;
+  }>({});
+  const [isSelecting, setIsSelecting] = useState(false);
+  const [startPos, setStartPos] = useState<{ row: number; col: number } | null>(null);
+  const [currentPos, setCurrentPos] = useState<{ row: number; col: number } | null>(null);
+
+  const { rows, cols, data: frameData } = data;
+  const frame = new Float32Array(frameData);
+  const footMask = segmentFootKMeans(frameData, rows, cols);
+  const bbox = getFootBoundingBox(footMask, rows, cols);
+  const centerMass = getFootCenterOfMass(footMask, rows, cols);
+
+  const pixelSize = 16;
+
+  // Convertir coordenadas del canvas a coordenadas de matriz
+  const canvasToMatrix = (x: number, y: number) => {
+    const col = Math.floor(x / pixelSize);
+    const row = Math.floor(y / pixelSize);
+    return { row: Math.max(0, Math.min(rows - 1, row)), col: Math.max(0, Math.min(cols - 1, col)) };
+  };
+
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!currentROI || !bbox) return;
+    
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const pos = canvasToMatrix(x, y);
+    
+    // Solo permitir selección dentro del pie
+    const idx = pos.row * cols + pos.col;
+    if (!footMask[idx]) return;
+
+    setIsSelecting(true);
+    setStartPos(pos);
+    setCurrentPos(pos);
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isSelecting || !startPos) return;
+
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const pos = canvasToMatrix(x, y);
+    setCurrentPos(pos);
+  };
+
+  const handleMouseUp = () => {
+    if (!isSelecting || !startPos || !currentPos || !currentROI || !bbox || !centerMass) return;
+
+    const selection: ROISelection = {
+      minRow: Math.min(startPos.row, currentPos.row),
+      maxRow: Math.max(startPos.row, currentPos.row),
+      minCol: Math.min(startPos.col, currentPos.col),
+      maxCol: Math.max(startPos.col, currentPos.col),
+    };
+
+    setSelections(prev => ({ ...prev, [currentROI]: selection }));
+    setIsSelecting(false);
+    setStartPos(null);
+    setCurrentPos(null);
+  };
+
+  const handleSaveCalibration = () => {
+    if (!bbox || !centerMass || !selections.hallux || !selections.firstMetatarsal || !selections.heel) return;
+
+    const calibration: ROICalibration = {
+      hallux: normalizeCoordinates(selections.hallux, bbox, centerMass),
+      firstMetatarsal: normalizeCoordinates(selections.firstMetatarsal, bbox, centerMass),
+      heel: normalizeCoordinates(selections.heel, bbox, centerMass),
+      calibratedOn: {
+        footSide,
+        footHeight: bbox.maxRow - bbox.minRow + 1,
+        footWidth: bbox.maxCol - bbox.minCol + 1,
+        centerMass,
+      },
+    };
+
+    // Guardar en localStorage
+    localStorage.setItem('roiCalibration', JSON.stringify(calibration));
+    onCalibrationComplete(calibration);
+  };
+
+  // Dibujar canvas con selecciones
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    canvas.width = cols * pixelSize;
+    canvas.height = rows * pixelSize;
+
+    // Dibujar imagen térmica
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const idx = row * cols + col;
+        const temp = frame[idx];
+        const isFoot = footMask[idx];
+        const [r, g, b] = temperatureToColor(temp, tempRange.min, tempRange.max);
+
+        const x = col * pixelSize;
+        const y = row * pixelSize;
+
+        ctx.fillStyle = isFoot ? `rgb(${r}, ${g}, ${b})` : `rgba(${r}, ${g}, ${b}, 0.15)`;
+        ctx.fillRect(x, y, pixelSize - 1, pixelSize - 1);
+      }
+    }
+
+    // Dibujar selecciones existentes
+    const colors = {
+      hallux: 'rgba(255, 0, 0, 0.4)',
+      firstMetatarsal: 'rgba(0, 255, 0, 0.4)',
+      heel: 'rgba(0, 0, 255, 0.4)',
+    };
+
+    Object.entries(selections).forEach(([roi, selection]) => {
+      if (!selection) return;
+      ctx.fillStyle = colors[roi as keyof typeof colors];
+      ctx.fillRect(
+        selection.minCol * pixelSize,
+        selection.minRow * pixelSize,
+        (selection.maxCol - selection.minCol + 1) * pixelSize,
+        (selection.maxRow - selection.minRow + 1) * pixelSize
+      );
+    });
+
+    // Dibujar selección actual
+    if (isSelecting && startPos && currentPos) {
+      const selection = {
+        minRow: Math.min(startPos.row, currentPos.row),
+        maxRow: Math.max(startPos.row, currentPos.row),
+        minCol: Math.min(startPos.col, currentPos.col),
+        maxCol: Math.max(startPos.col, currentPos.col),
+      };
+      ctx.fillStyle = colors[currentROI as keyof typeof colors] || 'rgba(255, 255, 0, 0.4)';
+      ctx.fillRect(
+        selection.minCol * pixelSize,
+        selection.minRow * pixelSize,
+        (selection.maxCol - selection.minCol + 1) * pixelSize,
+        (selection.maxRow - selection.minRow + 1) * pixelSize
+      );
+    }
+  }, [data, tempRange, selections, isSelecting, startPos, currentPos, currentROI, footMask, frame, rows, cols]);
+
+  return (
+    <div className="roi-calibration">
+      <div className="calibration-header">
+        <h3>Definir Áreas de Interés</h3>
+        <button onClick={onCancel} className="cancel-calibration-btn">✕</button>
+      </div>
+      <div className="calibration-controls">
+        <button 
+          onClick={() => setCurrentROI('hallux')}
+          className={`roi-select-btn ${currentROI === 'hallux' ? 'active' : ''} ${selections.hallux ? 'completed' : ''}`}
+        >
+          {selections.hallux ? '✓' : ''} Hallux
+        </button>
+        <button 
+          onClick={() => setCurrentROI('firstMetatarsal')}
+          className={`roi-select-btn ${currentROI === 'firstMetatarsal' ? 'active' : ''} ${selections.firstMetatarsal ? 'completed' : ''}`}
+        >
+          {selections.firstMetatarsal ? '✓' : ''} Primer Metatarsiano
+        </button>
+        <button 
+          onClick={() => setCurrentROI('heel')}
+          className={`roi-select-btn ${currentROI === 'heel' ? 'active' : ''} ${selections.heel ? 'completed' : ''}`}
+        >
+          {selections.heel ? '✓' : ''} Talón
+        </button>
+      </div>
+      <canvas
+        ref={canvasRef}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        style={{ cursor: currentROI ? 'crosshair' : 'default' }}
+        className="calibration-canvas"
+      />
+      <div className="calibration-instructions">
+        <p>
+          {currentROI 
+            ? `Selecciona la zona del ${currentROI === 'hallux' ? 'Hallux' : currentROI === 'firstMetatarsal' ? 'Primer Metatarsiano' : 'Talón'}. Haz clic y arrastra sobre el pie.`
+            : 'Selecciona una zona para comenzar'}
+        </p>
+      </div>
+      <div className="calibration-actions">
+        <button 
+          onClick={handleSaveCalibration}
+          disabled={!selections.hallux || !selections.firstMetatarsal || !selections.heel}
+          className="save-calibration-btn"
+        >
+          Guardar Calibración
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // Componente para renderizar una captura
-function CapturedCanvas({ data, tempRange }: { data: ThermalData; tempRange: { min: number; max: number } }) {
+function CapturedCanvas({ 
+  data, 
+  tempRange, 
+  footSide 
+}: { 
+  data: ThermalData; 
+  tempRange: { min: number; max: number };
+  footSide?: 'izquierdo' | 'derecho';
+}) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
@@ -33,11 +276,18 @@ function CapturedCanvas({ data, tempRange }: { data: ThermalData; tempRange: { m
     // Segmentar el pie del fondo usando K-means
     const footMask = segmentFootKMeans(frameData, rows, cols);
 
+    // Aplicar calibración de ROIs si está disponible y se proporciona el tipo de pie
+    let rois = null;
+    if (footSide) {
+      rois = applyROICalibration(footMask, rows, cols, footSide);
+    }
+
     const pixelSize = 16;
     const borderWidth = 1;
     canvas.width = cols * pixelSize;
     canvas.height = rows * pixelSize;
 
+    // Dibujar imagen térmica
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
         const idx = row * cols + col;
@@ -64,7 +314,35 @@ function CapturedCanvas({ data, tempRange }: { data: ThermalData; tempRange: { m
         ctx.strokeRect(x, y, pixelSize - borderWidth, pixelSize - borderWidth);
       }
     }
-  }, [data, tempRange]);
+
+    // Dibujar ROIs si están disponibles
+    if (rois) {
+      const roiColors = {
+        hallux: 'rgba(255, 0, 0, 0.3)',
+        firstMetatarsal: 'rgba(0, 255, 0, 0.3)',
+        heel: 'rgba(0, 0, 255, 0.3)',
+      };
+
+      // Dibujar cada ROI
+      Object.entries({
+        hallux: rois.hallux,
+        firstMetatarsal: rois.firstMetatarsal,
+        heel: rois.heel,
+      }).forEach(([roiName, roiMask]) => {
+        ctx.fillStyle = roiColors[roiName as keyof typeof roiColors];
+        for (let row = 0; row < rows; row++) {
+          for (let col = 0; col < cols; col++) {
+            const idx = row * cols + col;
+            if (roiMask[idx]) {
+              const x = col * pixelSize;
+              const y = row * pixelSize;
+              ctx.fillRect(x, y, pixelSize - borderWidth, pixelSize - borderWidth);
+            }
+          }
+        }
+      });
+    }
+  }, [data, tempRange, footSide]);
 
   return <canvas ref={canvasRef} className="captured-canvas" />;
 }
@@ -85,6 +363,8 @@ export default function ThermalViewer() {
   const [capturedLeft, setCapturedLeft] = useState<ThermalData | null>(null);
   const [capturedRight, setCapturedRight] = useState<ThermalData | null>(null);
   const [showConfirmation, setShowConfirmation] = useState(false);
+  const [showCalibration, setShowCalibration] = useState(false);
+  const [calibrationFoot, setCalibrationFoot] = useState<'izquierdo' | 'derecho' | null>(null);
   
   // Refs para estadísticas que no necesitan re-render
   const frameCountRef = useRef(0);
@@ -710,7 +990,7 @@ export default function ThermalViewer() {
             <div className="capture-preview-container">
               <div className="capture-preview">
                 <h3>Pie Derecho</h3>
-                {capturedRight && <CapturedCanvas data={capturedRight} tempRange={tempRange} />}
+                {capturedRight && <CapturedCanvas data={capturedRight} tempRange={tempRange} footSide="derecho" />}
                 <button 
                   onClick={() => handleRetake('derecho')}
                   className="retake-btn"
@@ -720,7 +1000,7 @@ export default function ThermalViewer() {
               </div>
               <div className="capture-preview">
                 <h3>Pie Izquierdo</h3>
-                {capturedLeft && <CapturedCanvas data={capturedLeft} tempRange={tempRange} />}
+                {capturedLeft && <CapturedCanvas data={capturedLeft} tempRange={tempRange} footSide="izquierdo" />}
                 <button 
                   onClick={() => handleRetake('izquierdo')}
                   className="retake-btn"
@@ -730,6 +1010,16 @@ export default function ThermalViewer() {
               </div>
             </div>
             <div className="confirmation-actions">
+              <button 
+                onClick={() => {
+                  setShowCalibration(true);
+                  setCalibrationFoot('derecho');
+                }}
+                className="calibration-btn"
+                title="Definir áreas de interés"
+              >
+                ⚙️ Áreas de Interés
+              </button>
               <button onClick={handleConfirm} className="confirm-btn">
                 Confirmar
               </button>
@@ -745,6 +1035,48 @@ export default function ThermalViewer() {
                 Cancelar
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {showCalibration && calibrationFoot && (
+        <div className="calibration-overlay">
+          <div className="calibration-modal">
+            {calibrationFoot === 'derecho' && capturedRight && (
+              <ROICalibrationCanvas
+                data={capturedRight}
+                tempRange={tempRange}
+                footSide="derecho"
+                onCalibrationComplete={(calibration) => {
+                  console.log('Calibración guardada:', calibration);
+                  setShowCalibration(false);
+                  setCalibrationFoot(null);
+                  // Opcional: mostrar mensaje de éxito
+                  alert('Calibración guardada exitosamente. Las áreas de interés se aplicarán automáticamente a futuras capturas.');
+                }}
+                onCancel={() => {
+                  setShowCalibration(false);
+                  setCalibrationFoot(null);
+                }}
+              />
+            )}
+            {calibrationFoot === 'izquierdo' && capturedLeft && (
+              <ROICalibrationCanvas
+                data={capturedLeft}
+                tempRange={tempRange}
+                footSide="izquierdo"
+                onCalibrationComplete={(calibration) => {
+                  console.log('Calibración guardada:', calibration);
+                  setShowCalibration(false);
+                  setCalibrationFoot(null);
+                  alert('Calibración guardada exitosamente. Las áreas de interés se aplicarán automáticamente a futuras capturas.');
+                }}
+                onCancel={() => {
+                  setShowCalibration(false);
+                  setCalibrationFoot(null);
+                }}
+              />
+            )}
           </div>
         </div>
       )}
