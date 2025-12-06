@@ -709,16 +709,6 @@ export default function ThermalViewer() {
             <p>Revisa las capturas y elige una opción:</p>
             <div className="capture-preview-container">
               <div className="capture-preview">
-                <h3>Pie Izquierdo</h3>
-                {capturedLeft && <CapturedCanvas data={capturedLeft} tempRange={tempRange} />}
-                <button 
-                  onClick={() => handleRetake('izquierdo')}
-                  className="retake-btn"
-                >
-                  Retomar Izquierdo
-                </button>
-              </div>
-              <div className="capture-preview">
                 <h3>Pie Derecho</h3>
                 {capturedRight && <CapturedCanvas data={capturedRight} tempRange={tempRange} />}
                 <button 
@@ -726,6 +716,16 @@ export default function ThermalViewer() {
                   className="retake-btn"
                 >
                   Retomar Derecho
+                </button>
+              </div>
+              <div className="capture-preview">
+                <h3>Pie Izquierdo</h3>
+                {capturedLeft && <CapturedCanvas data={capturedLeft} tempRange={tempRange} />}
+                <button 
+                  onClick={() => handleRetake('izquierdo')}
+                  className="retake-btn"
+                >
+                  Retomar Izquierdo
                 </button>
               </div>
             </div>
