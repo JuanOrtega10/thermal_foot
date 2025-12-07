@@ -12,6 +12,9 @@ import {
   type ROISelection
 } from '@/lib/utils';
 import DashboardScreen from './DashboardScreen';
+import AnalysisScreen from './AnalysisScreen';
+import PreparationScreen from './PreparationScreen';
+import RecordingIndicator from './RecordingIndicator';
 
 interface ThermalData {
   rows: number;
@@ -418,6 +421,17 @@ export default function ThermalViewer() {
   const [showCalibration, setShowCalibration] = useState(false);
   const [calibrationFoot, setCalibrationFoot] = useState<'izquierdo' | 'derecho' | null>(null);
   const [showDashboard, setShowDashboard] = useState(false);
+  const [showAnalysis, setShowAnalysis] = useState(false);
+  const [showPreparation, setShowPreparation] = useState(true);
+  const [recordingBlob, setRecordingBlob] = useState<Blob | null>(null);
+  
+  // Estado de grabación
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
   
   // Refs para estadísticas que no necesitan re-render
   const frameCountRef = useRef(0);
@@ -432,6 +446,72 @@ export default function ThermalViewer() {
   const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const simulationModeRef = useRef<'baja_diferencia' | 'alta_diferencia'>('baja_diferencia');
   const footRef = useRef<'izquierdo' | 'derecho'>('izquierdo');
+
+  // Funciones de grabación
+  const startRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordingStreamRef.current = stream;
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        setRecordingBlob(audioBlob);
+        console.log('Grabación completada, tamaño:', audioBlob.size);
+        // Detener todos los tracks del stream
+        if (recordingStreamRef.current) {
+          recordingStreamRef.current.getTracks().forEach((track) => track.stop());
+          recordingStreamRef.current = null;
+        }
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+      setRecordingTime(0);
+
+      // Timer para el tiempo de grabación
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingTime((prev) => prev + 1);
+      }, 1000);
+    } catch (error) {
+      console.error('Error al iniciar la grabación:', error);
+      alert('No se pudo acceder al micrófono. Por favor, verifica los permisos.');
+    }
+  }, []);
+
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+      
+      // El blob se establecerá en el callback onstop del MediaRecorder
+    }
+  }, [isRecording]);
+
+  // Cleanup de grabación al desmontar
+  useEffect(() => {
+    return () => {
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+      }
+      if (recordingStreamRef.current) {
+        recordingStreamRef.current.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, []);
 
   // Función para dibujar un frame en el canvas
   const drawFrame = useCallback((data: ThermalData) => {
@@ -455,8 +535,8 @@ export default function ThermalViewer() {
       return;
     }
 
-    // Dimensiones del canvas - píxeles más grandes para mejor estética
-    const pixelSize = 16; // 16px por píxel del sensor
+    // Dimensiones del canvas - ajustado para que quepa completo
+    const pixelSize = 18; // 18px por píxel del sensor (reducido para que quepa completo)
     const canvasWidth = cols * pixelSize;
     const canvasHeight = rows * pixelSize;
     const pixelWidth = pixelSize;
@@ -491,6 +571,25 @@ export default function ThermalViewer() {
         ctx.strokeRect(x, y, pixelWidth - borderWidth, pixelHeight - borderWidth);
       }
     }
+
+    // Dibujar líneas guía (crosshair)
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 5]);
+    
+    // Línea vertical central
+    ctx.beginPath();
+    ctx.moveTo(canvasWidth / 2, 0);
+    ctx.lineTo(canvasWidth / 2, canvasHeight);
+    ctx.stroke();
+    
+    // Línea horizontal central
+    ctx.beginPath();
+    ctx.moveTo(0, canvasHeight / 2);
+    ctx.lineTo(canvasWidth, canvasHeight / 2);
+    ctx.stroke();
+    
+    ctx.setLineDash([]); // Reset line dash
 
     // Calcular estadísticas
     const frameStats = calculateStats(frameData);
@@ -880,8 +979,15 @@ export default function ThermalViewer() {
     // Aquí puedes agregar lógica para procesar las capturas
     console.log('Capturas confirmadas:', { left: capturedLeft, right: capturedRight });
     setShowConfirmation(false);
-    // Mostrar dashboard
-    setShowDashboard(true);
+    // Mostrar análisis screen
+    setShowAnalysis(true);
+  };
+
+  const handleNewScreening = () => {
+    setShowAnalysis(false);
+    setCapturedLeft(null);
+    setCapturedRight(null);
+    setFoot('izquierdo');
   };
 
   const handleReconnect = () => {
@@ -916,6 +1022,24 @@ export default function ThermalViewer() {
     connect();
   };
 
+  // Mostrar pantalla de preparación si está activa
+  if (showPreparation) {
+    return (
+      <>
+        <PreparationScreen
+          onContinue={() => {
+            setShowPreparation(false);
+          }}
+          isRecording={isRecording}
+          recordingTime={recordingTime}
+          onStartRecording={startRecording}
+          onStopRecording={stopRecording}
+        />
+        <RecordingIndicator isRecording={isRecording} recordingTime={recordingTime} />
+      </>
+    );
+  }
+
   // Mostrar dashboard si está activo
   if (showDashboard) {
     return (
@@ -935,19 +1059,23 @@ export default function ThermalViewer() {
 
   return (
     <div className="thermal-viewer">
-      <div className="controls">
+      <RecordingIndicator isRecording={isRecording} recordingTime={recordingTime} />
+      {/* Controles superiores sutiles */}
+      <div className="top-controls">
         <div className="connection-status">
           <div className={`status-indicator ${connected ? 'connected' : isConnecting ? 'connecting' : 'disconnected'}`} />
           <span>
             {connected ? 'Conectado' : isConnecting ? 'Conectando...' : 'Desconectado'}
           </span>
-          <button 
-            onClick={handleReconnect} 
-            className="reconnect-btn"
-            disabled={isConnecting}
-          >
-            {isConnecting ? 'Conectando...' : 'Reconectar'}
-          </button>
+          {!connected && (
+            <button 
+              onClick={handleReconnect} 
+              className="reconnect-btn"
+              disabled={isConnecting}
+            >
+              {isConnecting ? 'Conectando...' : 'Reconectar'}
+            </button>
+          )}
         </div>
         
         {error && (
@@ -957,161 +1085,334 @@ export default function ThermalViewer() {
           </div>
         )}
 
-        <div className="server-config">
-          <label>
-            URL del servidor:
-            <input
-              type="text"
-              value={serverUrl}
-              onChange={(e) => setServerUrl(e.target.value)}
-              disabled={connected}
-              className="server-input"
-            />
-          </label>
-        </div>
-
-        <div className="simulation-controls">
-          <div className="simulation-mode">
-            <label>
-              Modo de simulación:
-              <select
-                value={simulationMode}
-                onChange={(e) => {
-                  const newMode = e.target.value as 'baja_diferencia' | 'alta_diferencia';
-                  setSimulationMode(newMode);
-                }}
-                className="mode-select"
-                disabled={!connected}
-              >
-                <option value="baja_diferencia">Baja Diferencia de Temperatura</option>
-                <option value="alta_diferencia">Alta Diferencia de Temperatura</option>
-              </select>
-            </label>
-          </div>
-
-          <div className="foot-selector">
-            <label>
-              Pie a visualizar:
-              <select
-                value={foot}
-                onChange={(e) => {
-                  const newFoot = e.target.value as 'izquierdo' | 'derecho';
-                  setFoot(newFoot);
-                }}
-                className="foot-select"
-                disabled={!connected}
-              >
-                <option value="izquierdo">Pie Izquierdo</option>
-                <option value="derecho">Pie Derecho</option>
-              </select>
-            </label>
-          </div>
-        </div>
-
-        <div className="temp-range">
-          <label>
-            Temp. mínima:
-            <input
-              type="number"
-              step="0.1"
-              value={tempRange.min}
-              onChange={(e) =>
-                setTempRange({ ...tempRange, min: parseFloat(e.target.value) })
-              }
-              className="temp-input"
-            />
-            °C
-          </label>
-          <label>
-            Temp. máxima:
-            <input
-              type="number"
-              step="0.1"
-              value={tempRange.max}
-              onChange={(e) =>
-                setTempRange({ ...tempRange, max: parseFloat(e.target.value) })
-              }
-              className="temp-input"
-            />
-            °C
-          </label>
-        </div>
-
-        <div className="capture-controls">
+        {/* Botones de simulación sutiles */}
+        <div className="simulation-controls-subtle">
           <button
-            onClick={handleCapture}
-            className="capture-btn"
+            onClick={() => {
+              const newMode = simulationMode === 'baja_diferencia' ? 'alta_diferencia' : 'baja_diferencia';
+              setSimulationMode(newMode);
+            }}
+            className={`simulation-toggle ${simulationMode === 'alta_diferencia' ? 'active' : ''}`}
+            disabled={!connected}
+            title="Modo de simulación"
+          >
+            {simulationMode === 'baja_diferencia' ? 'Baja Dif.' : 'Alta Dif.'}
+          </button>
+        </div>
+      </div>
+
+      {/* Layout principal de captura */}
+      <div className="capture-layout">
+        {/* Sidebar izquierdo con métricas */}
+        <div className="metrics-sidebar">
+          <div className="metrics-card">
+            <h3 className="metrics-title">Métricas</h3>
+            <div className="metrics-content">
+              {/* FPS con barra de progreso */}
+              <div className="metric-item">
+                <div className="metric-header">
+                  <span className="metric-label">FPS</span>
+                  <span className="metric-value">{Math.round(stats.fps)}</span>
+                </div>
+                <div className="fps-progress-bar">
+                  <div 
+                    className="fps-progress-fill" 
+                    style={{ width: `${Math.min((stats.fps / 10) * 100, 100)}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* Temperaturas */}
+              <div className="metric-item">
+                <span className="metric-label">Temp. Mínima</span>
+                <span className="metric-value">{stats.min.toFixed(1)}°C</span>
+              </div>
+              <div className="metric-item">
+                <span className="metric-label">Temp. Máxima</span>
+                <span className="metric-value">{stats.max.toFixed(1)}°C</span>
+              </div>
+              <div className="metric-item">
+                <span className="metric-label">Temp. Promedio</span>
+                <span className="metric-value">{stats.avg.toFixed(1)}°C</span>
+              </div>
+
+              {/* Resolución y Protocolo */}
+              <div className="metric-item">
+                <span className="metric-label">Resolución</span>
+                <span className="metric-value">
+                  {lastFrameRef.current ? `${lastFrameRef.current.rows}×${lastFrameRef.current.cols}` : 'N/A'}
+                </span>
+              </div>
+              <div className="metric-item">
+                <span className="metric-label">Protocolo</span>
+                <div className="protocol-value">
+                  <span className="protocol-icon">📡</span>
+                  <span>WebSocket</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Estado de alineación */}
+          <div className={`alignment-status ${connected && lastFrameRef.current ? 'aligned' : ''}`}>
+            <div className="alignment-icon">📐</div>
+            <span className="alignment-text">{connected && lastFrameRef.current ? 'Alineado' : 'Alineando...'}</span>
+          </div>
+
+          {/* Botón siguiente */}
+          <button
+            onClick={() => {
+              if (foot === 'izquierdo') {
+                handleCapture();
+              } else if (foot === 'derecho' && !capturedRight) {
+                handleCapture();
+              } else if (capturedLeft && capturedRight) {
+                setShowConfirmation(true);
+              }
+            }}
+            className="next-foot-btn"
             disabled={!connected || !lastFrameRef.current}
           >
             {foot === 'izquierdo' 
-              ? (capturedLeft ? '📸 Recapturar Pie Izquierdo' : '📸 Capturar Pie Izquierdo')
-              : (capturedRight ? '📸 Recapturar Pie Derecho' : '📸 Capturar Pie Derecho')
+              ? (capturedLeft ? 'Siguiente: Pie Derecho' : 'Capturar Pie Izquierdo')
+              : capturedRight 
+                ? 'Ver Resultados'
+                : 'Capturar Pie Derecho'
             }
           </button>
-          {capturedLeft && (
-            <span className="capture-status">✓ Pie Izquierdo capturado</span>
-          )}
-          {capturedRight && (
-            <span className="capture-status">✓ Pie Derecho capturado</span>
-          )}
+        </div>
+
+        {/* Área principal con visualizador térmico */}
+        <div className="thermal-main-area">
+          <div className="thermal-header">
+            <h2 className="foot-title">{foot === 'izquierdo' ? 'Izquierdo' : 'Derecho'}</h2>
+          </div>
+          
+          <div className="thermal-viewer-container">
+            <div className="thermal-canvas-wrapper">
+              <canvas ref={canvasRef} className="thermal-canvas-capture" />
+              {/* Overlay de estado */}
+              <div className="thermal-overlay">
+                <div className={`alignment-badge ${connected && lastFrameRef.current ? 'aligned' : ''}`}>
+                  <span>{connected && lastFrameRef.current ? 'Alineado' : 'Alineando...'}</span>
+                </div>
+                <div className="fps-badge">
+                  <span>{Math.round(stats.fps)} FPS</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Leyenda de temperatura */}
+          <div className="temperature-legend-card">
+            <h3 className="legend-title">Leyenda de Temperatura</h3>
+            <div className="temperature-legend">
+              <div className="legend-gradient">
+                {Array.from({ length: 100 }, (_, i) => {
+                  const temp = tempRange.min + (tempRange.max - tempRange.min) * (i / 99);
+                  const [r, g, b] = temperatureToColor(temp, tempRange.min, tempRange.max);
+                  return (
+                    <div
+                      key={i}
+                      className="legend-color-segment"
+                      style={{ backgroundColor: `rgb(${r}, ${g}, ${b})` }}
+                    />
+                  );
+                })}
+              </div>
+              <div className="legend-labels">
+                <span className="legend-label-min">{tempRange.min.toFixed(1)}°C</span>
+                <span className="legend-label-max">{tempRange.max.toFixed(1)}°C</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Instrucciones en la parte inferior */}
+          <div className="instructions-section">
+            <div className="instruction-card">
+              <div className="instruction-icon">👣</div>
+              <p className="instruction-text">Mantenga el pie quieto</p>
+            </div>
+            <div className="instruction-card">
+              <div className="instruction-icon">📏</div>
+              <p className="instruction-text">Siga las líneas guía</p>
+            </div>
+            <div className="instruction-card">
+              <div className="instruction-icon">⏱️</div>
+              <p className="instruction-text">Espere la confirmación</p>
+            </div>
+          </div>
         </div>
       </div>
 
       {showConfirmation && (
-        <div className="confirmation-overlay">
-          <div className="confirmation-modal">
-            <h2>Confirmar Capturas</h2>
-            <p>Revisa las capturas y elige una opción:</p>
-            <div className="capture-preview-container">
-              <div className="capture-preview">
-                <h3>Pie Derecho</h3>
-                {capturedRight && <CapturedCanvas data={capturedRight} tempRange={tempRange} footSide="derecho" />}
+        <>
+          <RecordingIndicator isRecording={isRecording} recordingTime={recordingTime} />
+          {(() => {
+        // Calcular estadísticas para cada pie
+        const getFootStats = (data: ThermalData | null) => {
+          if (!data) return null;
+          const footMask = segmentFootKMeans(data.data, data.rows, data.cols);
+          const footTemps: number[] = [];
+          for (let i = 0; i < data.data.length; i++) {
+            if (footMask[i]) {
+              footTemps.push(data.data[i]);
+            }
+          }
+          if (footTemps.length === 0) return null;
+          return calculateStats(footTemps);
+        };
+
+        const leftStats = getFootStats(capturedLeft);
+        const rightStats = getFootStats(capturedRight);
+        const avgDiff = leftStats && rightStats ? rightStats.avg - leftStats.avg : null;
+        const diffLevel = avgDiff !== null 
+          ? Math.abs(avgDiff) < 1 ? 'normal' 
+          : Math.abs(avgDiff) < 2 ? 'moderada' 
+          : 'alta'
+          : null;
+
+        return (
+          <div className="confirmation-overlay">
+            <div className="confirmation-modal-new">
+              {/* Header */}
+              <div className="confirmation-header-new">
+                <div className="confirmation-logo">⭐</div>
+                <div className="confirmation-header-text">
+                  <h2>Resumen</h2>
+                  <p>Revise las imágenes térmicas antes de continuar con el análisis</p>
+                </div>
+              </div>
+
+              {/* Main content - Two cards side by side */}
+              <div className="confirmation-cards-container">
+                {/* Right foot card (shown on left) */}
+                <div className="confirmation-foot-card">
+                  <div className="confirmation-foot-header">
+                    <div>
+                      <h3>Derecho</h3>
+                      <p className="capture-status-text">Captura completada</p>
+                    </div>
+                    <div className="foot-icon">👣</div>
+                  </div>
+                  <div className="confirmation-thermal-image-container">
+                    {capturedRight && (
+                      <>
+                        <CapturedCanvas data={capturedRight} tempRange={tempRange} footSide="derecho" />
+                        {rightStats && (
+                          <div className="thermal-avg-badge">
+                            {rightStats.avg.toFixed(1)}°C avg
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  {rightStats && (
+                    <div className="confirmation-stats">
+                      <div className="confirmation-stat-item">
+                        <span className="stat-label">Min</span>
+                        <span className="stat-value">{rightStats.min.toFixed(1)}°C</span>
+                      </div>
+                      <div className="confirmation-stat-item">
+                        <span className="stat-label">Avg</span>
+                        <span className="stat-value stat-avg">{rightStats.avg.toFixed(1)}°C</span>
+                      </div>
+                      <div className="confirmation-stat-item">
+                        <span className="stat-label">Max</span>
+                        <span className="stat-value">{rightStats.max.toFixed(1)}°C</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Left foot card (shown on right) */}
+                <div className="confirmation-foot-card">
+                  <div className="confirmation-foot-header">
+                    <div>
+                      <h3>Izquierdo</h3>
+                      <p className="capture-status-text">Captura completada</p>
+                    </div>
+                    <div className="foot-icon">👣</div>
+                  </div>
+                  <div className="confirmation-thermal-image-container">
+                    {capturedLeft && (
+                      <>
+                        <CapturedCanvas data={capturedLeft} tempRange={tempRange} footSide="izquierdo" />
+                        {leftStats && (
+                          <div className="thermal-avg-badge">
+                            {leftStats.avg.toFixed(1)}°C avg
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  {leftStats && (
+                    <div className="confirmation-stats">
+                      <div className="confirmation-stat-item">
+                        <span className="stat-label">Min</span>
+                        <span className="stat-value">{leftStats.min.toFixed(1)}°C</span>
+                      </div>
+                      <div className="confirmation-stat-item">
+                        <span className="stat-label">Avg</span>
+                        <span className="stat-value stat-avg">{leftStats.avg.toFixed(1)}°C</span>
+                      </div>
+                      <div className="confirmation-stat-item">
+                        <span className="stat-label">Max</span>
+                        <span className="stat-value">{leftStats.max.toFixed(1)}°C</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Single settings button for ROI calibration */}
+              <div className="confirmation-settings-container">
                 <button 
-                  onClick={() => handleRetake('derecho')}
-                  className="retake-btn"
+                  onClick={() => {
+                    setShowCalibration(true);
+                    setCalibrationFoot('derecho');
+                  }}
+                  className="confirmation-settings-btn-single"
+                  title="Definir áreas de interés"
                 >
-                  Retomar Derecho
+                  ⚙️ Áreas de Interés
                 </button>
               </div>
-              <div className="capture-preview">
-                <h3>Pie Izquierdo</h3>
-                {capturedLeft && <CapturedCanvas data={capturedLeft} tempRange={tempRange} footSide="izquierdo" />}
-                <button 
-                  onClick={() => handleRetake('izquierdo')}
-                  className="retake-btn"
-                >
-                  Retomar Izquierdo
+
+              {/* Difference section */}
+              {avgDiff !== null && (
+                <div className="confirmation-difference-section">
+                  <div className="difference-info">
+                    <div className="difference-icon">→</div>
+                    <div>
+                      <p className="difference-label">Diferencia de temperatura promedio</p>
+                      <p className={`difference-value ${diffLevel === 'alta' ? 'high' : diffLevel === 'moderada' ? 'moderate' : ''}`}>
+                        {avgDiff > 0 ? '+' : ''}{avgDiff.toFixed(1)}°C
+                      </p>
+                    </div>
+                  </div>
+                  {diffLevel && (
+                    <div className={`difference-badge ${diffLevel}`}>
+                      {diffLevel === 'alta' ? 'Diferencia alta detectada' : 
+                       diffLevel === 'moderada' ? 'Diferencia moderada detectada' : 
+                       'Diferencia normal'}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Action button */}
+              <div className="confirmation-actions-new">
+                <button onClick={handleConfirm} className="confirmation-continue-btn">
+                  <span>Analizar y Continuar</span>
+                  <span className="arrow-icon">→</span>
                 </button>
               </div>
-            </div>
-            <div className="confirmation-actions">
-              <button 
-                onClick={() => {
-                  setShowCalibration(true);
-                  setCalibrationFoot('derecho');
-                }}
-                className="calibration-btn"
-                title="Definir áreas de interés"
-              >
-                ⚙️ Áreas de Interés
-              </button>
-              <button onClick={handleConfirm} className="confirm-btn">
-                Confirmar
-              </button>
-              <button 
-                onClick={() => {
-                  setShowConfirmation(false);
-                  setCapturedLeft(null);
-                  setCapturedRight(null);
-                  setFoot('izquierdo');
-                }} 
-                className="cancel-btn"
-              >
-                Cancelar
-              </button>
             </div>
           </div>
-        </div>
+        );
+          })()}
+        </>
       )}
 
       {showCalibration && calibrationFoot && (
@@ -1156,59 +1457,45 @@ export default function ThermalViewer() {
         </div>
       )}
 
-      <div className="canvas-container">
-        <canvas ref={canvasRef} className="thermal-canvas" />
-        {!connected && !isConnecting && (
-          <div className="canvas-overlay">
-            {error ? (
-              <div className="error-overlay">
-                <p className="error-title">No hay conexión</p>
-                <p className="error-detail">{error}</p>
-                <button onClick={handleReconnect} className="retry-btn">
-                  Intentar de nuevo
-                </button>
-              </div>
-            ) : (
-              <p>Esperando conexión al servidor...</p>
-            )}
-          </div>
-        )}
-        {!connected && isConnecting && (
-          <div className="canvas-overlay">
-            <div className="connecting-message">
-              <div className="spinner"></div>
-              <p>Conectando al servidor...</p>
+      {/* Overlay de conexión */}
+      {!connected && !isConnecting && (
+        <div className="canvas-overlay">
+          {error ? (
+            <div className="error-overlay">
+              <p className="error-title">No hay conexión</p>
+              <p className="error-detail">{error}</p>
+              <button onClick={handleReconnect} className="retry-btn">
+                Intentar de nuevo
+              </button>
             </div>
+          ) : (
+            <p>Esperando conexión al servidor...</p>
+          )}
+        </div>
+      )}
+      {!connected && isConnecting && (
+        <div className="canvas-overlay">
+          <div className="connecting-message">
+            <div className="spinner"></div>
+            <p>Conectando al servidor...</p>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      <div className="stats">
-        <div className="stat-item">
-          <span className="stat-label">FPS:</span>
-          <span className="stat-value">{stats.fps}</span>
-        </div>
-        <div className="stat-item">
-          <span className="stat-label">Temp. mín:</span>
-          <span className="stat-value">{stats.min}°C</span>
-        </div>
-        <div className="stat-item">
-          <span className="stat-label">Temp. máx:</span>
-          <span className="stat-value">{stats.max}°C</span>
-        </div>
-        <div className="stat-item">
-          <span className="stat-label">Temp. promedio:</span>
-          <span className="stat-value">{stats.avg}°C</span>
-        </div>
-        {lastFrameRef.current && (
-          <div className="stat-item">
-            <span className="stat-label">Dimensiones:</span>
-            <span className="stat-value">
-              {lastFrameRef.current.rows} × {lastFrameRef.current.cols}
-            </span>
-          </div>
-        )}
-      </div>
+      {/* Analysis Screen */}
+      {showAnalysis && (
+        <AnalysisScreen
+          capturedLeft={capturedLeft}
+          capturedRight={capturedRight}
+          tempRange={tempRange}
+          onBack={() => setShowAnalysis(false)}
+          onNewScreening={handleNewScreening}
+          isRecording={isRecording}
+          recordingTime={recordingTime}
+          recordingBlob={recordingBlob}
+          onStopRecording={stopRecording}
+        />
+      )}
     </div>
   );
 }
