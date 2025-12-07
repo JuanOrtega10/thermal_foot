@@ -122,13 +122,19 @@ class SimulatedSensor:
             uniform_offset = -0.3 if self.foot == "izquierdo" else 0.3
             offset_map.fill(uniform_offset)
         else:  # alta_diferencia
-            # Diferencia alta: solo bajar temperatura del pie izquierdo
-            # Pie izquierdo: -1.5°C (más frío)
-            # Pie derecho: sin cambios (0°C)
-            # Esto crea una diferencia de 1.5°C entre ambos pies
-            if self.foot == "izquierdo":
-                offset_map.fill(-1.5)
-            # Si es pie derecho, offset_map permanece en 0 (sin cambios)
+            # Solo aplicar offset de 4°C en las zonas más calientes del pie derecho
+            # El pie izquierdo se mantiene normal (sin offset)
+            if self.foot == "derecho":
+                # Calcular umbral basado en las temperaturas de la imagen base
+                # Usar el percentil 70 para identificar las zonas más calientes
+                temp_threshold = np.percentile(self.base, 70)
+                
+                # Crear máscara para las zonas que están por encima del umbral
+                hot_zones_mask = self.base >= temp_threshold
+                
+                # Aplicar offset de 4°C solo en las zonas calientes
+                offset_map[hot_zones_mask] = 4.0
+            # Si es pie izquierdo, offset_map permanece en 0 (sin cambios)
         
         return offset_map
 
