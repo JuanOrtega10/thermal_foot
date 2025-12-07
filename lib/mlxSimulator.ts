@@ -225,7 +225,7 @@ export class MLXSimulator {
   private onFrameCallback: ((data: ThermalData) => void) | null = null;
   private simulationMode: SimulationMode = 'baja_diferencia';
   private foot: Foot = 'izquierdo';
-  private initializationPromise: Promise<void> | null = null;
+  private initializationPromise: Promise<boolean> | null = null;
 
   constructor(rows: number = 32, cols: number = 24) {
     this.sensor = new SimulatedSensor(rows, cols);
