@@ -1,4 +1,13 @@
 /**
+ * Tipo de datos térmicos
+ */
+export interface ThermalData {
+  rows: number;
+  cols: number;
+  data: number[];
+}
+
+/**
  * Convierte un valor de temperatura a color RGB usando un colormap tipo "inferno"
  * (azul oscuro → púrpura → rojo → amarillo)
  */

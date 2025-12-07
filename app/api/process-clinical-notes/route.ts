@@ -168,7 +168,6 @@ Contexto adicional: ${context}
 
 Genera las notas clínicas estructuradas según las instrucciones del sistema. Extrae únicamente información relevante sobre complicaciones, eventos recientes y autocuidado mencionados en esta consulta.`,
         temperature: 0.3, // Baja temperatura para respuestas más consistentes y precisas
-        maxTokens: 2000, // Límite razonable para notas clínicas
       });
       
       clinicalNotes = text;
