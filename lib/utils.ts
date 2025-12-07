@@ -382,6 +382,85 @@ export interface ROICalibration {
   };
 }
 
+/**
+ * Devuelve valores hardcodeados por defecto para las ROI (propósitos de demo)
+ * Valores basados en calibración real de un pie derecho
+ * Para pie izquierdo, se invierten las coordenadas horizontales
+ */
+export function getDefaultROICalibration(
+  footSide: 'izquierdo' | 'derecho',
+  footHeight: number,
+  footWidth: number
+): ROICalibration {
+  // Valores base para pie derecho (de calibración real)
+  const baseCalibration: ROICalibration = {
+    hallux: {
+      minRowNorm: 0,
+      maxRowNorm: 0.16129032258064516,
+      minColNorm: 0.5,
+      maxColNorm: 0.7272727272727273,
+    },
+    firstMetatarsal: {
+      minRowNorm: 0.1935483870967742,
+      maxRowNorm: 0.3225806451612903,
+      minColNorm: 0.5,
+      maxColNorm: 0.8181818181818182,
+    },
+    heel: {
+      minRowNorm: 0.6774193548387096,
+      maxRowNorm: 0.967741935483871,
+      minColNorm: 0.36363636363636365,
+      maxColNorm: 0.9545454545454546,
+    },
+    calibratedOn: {
+      footSide: 'derecho',
+      footHeight: 31,
+      footWidth: 22,
+    },
+  };
+
+  // Si es pie izquierdo, invertir las coordenadas horizontales
+  if (footSide === 'izquierdo') {
+    const invertCol = (colNorm: number) => 1 - colNorm;
+    
+    return {
+      hallux: {
+        minRowNorm: baseCalibration.hallux.minRowNorm,
+        maxRowNorm: baseCalibration.hallux.maxRowNorm,
+        minColNorm: invertCol(baseCalibration.hallux.maxColNorm),
+        maxColNorm: invertCol(baseCalibration.hallux.minColNorm),
+      },
+      firstMetatarsal: {
+        minRowNorm: baseCalibration.firstMetatarsal.minRowNorm,
+        maxRowNorm: baseCalibration.firstMetatarsal.maxRowNorm,
+        minColNorm: invertCol(baseCalibration.firstMetatarsal.maxColNorm),
+        maxColNorm: invertCol(baseCalibration.firstMetatarsal.minColNorm),
+      },
+      heel: {
+        minRowNorm: baseCalibration.heel.minRowNorm,
+        maxRowNorm: baseCalibration.heel.maxRowNorm,
+        minColNorm: invertCol(baseCalibration.heel.maxColNorm),
+        maxColNorm: invertCol(baseCalibration.heel.minColNorm),
+      },
+      calibratedOn: {
+        footSide,
+        footHeight,
+        footWidth,
+      },
+    };
+  }
+
+  // Para pie derecho, usar los valores base pero actualizar las dimensiones
+  return {
+    ...baseCalibration,
+    calibratedOn: {
+      footSide,
+      footHeight,
+      footWidth,
+    },
+  };
+}
+
 export interface ROISelection {
   minRow: number;
   maxRow: number;
@@ -655,24 +734,33 @@ export function applyROICalibration(
   footSide: 'izquierdo' | 'derecho',
   calibration?: ROICalibration
 ): FootROIs | null {
+  const bbox = getFootBoundingBox(footMask, rows, cols);
+  
+  if (!bbox) return null;
+
+  const footHeight = bbox.maxRow - bbox.minRow + 1;
+  const footWidth = bbox.maxCol - bbox.minCol + 1;
+
   // Cargar calibración si no se proporciona
   if (!calibration) {
     const saved = localStorage.getItem('roiCalibration');
-    if (!saved) return null;
-    try {
-      const parsed = JSON.parse(saved);
-      calibration = parsed as ROICalibration;
-    } catch (e) {
-      console.error('Error parsing ROI calibration:', e);
-      return null;
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        calibration = parsed as ROICalibration;
+      } catch (e) {
+        console.error('Error parsing ROI calibration:', e);
+        // Si hay error, usar valores por defecto
+        calibration = getDefaultROICalibration(footSide, footHeight, footWidth);
+      }
+    } else {
+      // Si no hay calibración guardada, usar valores hardcodeados por defecto (demo)
+      console.log('No hay calibración guardada, usando valores por defecto para demo');
+      calibration = getDefaultROICalibration(footSide, footHeight, footWidth);
     }
   }
 
   if (!calibration) return null;
-
-  const bbox = getFootBoundingBox(footMask, rows, cols);
-  
-  if (!bbox) return null;
 
   // Desnormalizar cada ROI primero sin invertir
   const halluxCoords = denormalizeCoordinates(calibration.hallux, bbox, false);

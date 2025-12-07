@@ -11,6 +11,7 @@ import {
   type ROICalibration,
   type ROISelection
 } from '@/lib/utils';
+import { MLXSimulator } from '@/lib/mlxSimulator';
 import DashboardScreen from './DashboardScreen';
 import AnalysisScreen from './AnalysisScreen';
 import PreparationScreen from './PreparationScreen';
@@ -446,6 +447,8 @@ export default function ThermalViewer() {
   const connectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const simulationModeRef = useRef<'baja_diferencia' | 'alta_diferencia'>('baja_diferencia');
   const footRef = useRef<'izquierdo' | 'derecho'>('izquierdo');
+  const simulatorRef = useRef<MLXSimulator | null>(null);
+  const [useSimulation, setUseSimulation] = useState(true); // Modo simulación por defecto
 
   // Funciones de grabación
   const startRecording = useCallback(async () => {
@@ -509,6 +512,67 @@ export default function ThermalViewer() {
       }
       if (recordingStreamRef.current) {
         recordingStreamRef.current.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, []);
+
+  // Funciones de simulación MLX
+  const startSimulation = useCallback(async () => {
+    // Detener WebSocket si está conectado
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.close();
+    }
+    
+    if (!simulatorRef.current) {
+      simulatorRef.current = new MLXSimulator(32, 24);
+    }
+    
+    // Esperar a que se cargue la configuración inicial (incluye la imagen)
+    try {
+      await simulatorRef.current.updateConfig(simulationModeRef.current, footRef.current);
+      await simulatorRef.current.start((data) => {
+        // Simular el comportamiento del WebSocket
+        setConnected(true);
+        setError(null);
+        hasReceivedValidDataRef.current = true;
+        
+        // Procesar frame como si viniera del WebSocket
+        if (drawFrameRef.current) {
+          drawFrameRef.current(data);
+        }
+      });
+      
+      setUseSimulation(true);
+      console.log('Simulación MLX iniciada');
+    } catch (err) {
+      console.error('Error iniciando simulación:', err);
+      setError('Error al iniciar la simulación');
+    }
+  }, []);
+
+  const stopSimulation = useCallback(() => {
+    if (simulatorRef.current) {
+      simulatorRef.current.stop();
+      setUseSimulation(false);
+      setConnected(false);
+      console.log('Simulación MLX detenida');
+    }
+  }, []);
+
+  // Actualizar configuración del simulador cuando cambian los modos
+  useEffect(() => {
+    if (simulatorRef.current && useSimulation) {
+      simulatorRef.current.updateConfig(simulationMode, foot).catch((err) => {
+        console.error('Error actualizando configuración del simulador:', err);
+      });
+    }
+  }, [simulationMode, foot, useSimulation]);
+
+  // Cleanup del simulador al desmontar
+  useEffect(() => {
+    return () => {
+      if (simulatorRef.current) {
+        simulatorRef.current.stop();
       }
     };
   }, []);
@@ -656,6 +720,11 @@ export default function ThermalViewer() {
 
   // Función de conexión WebSocket
   const connect = useCallback(() => {
+    // Detener simulación si está activa
+    if (useSimulation && simulatorRef.current) {
+      stopSimulation();
+    }
+    
     // Evitar múltiples intentos de conexión simultáneos
     if (isConnectingRef.current || (wsRef.current && wsRef.current.readyState === WebSocket.OPEN)) {
       return;
@@ -907,13 +976,13 @@ export default function ThermalViewer() {
       setIsConnecting(false);
       setError(`Error al crear conexión WebSocket: ${err instanceof Error ? err.message : 'Error desconocido'}`);
     }
-  }, [serverUrl]);
+  }, [serverUrl, useSimulation, stopSimulation]);
 
-  // Efecto para conectar al montar o cuando cambia serverUrl
+  // Efecto para iniciar simulación por defecto al montar (modo hackathon)
   useEffect(() => {
-    // Solo conectar si no hay una conexión activa
-    if (!wsRef.current || wsRef.current.readyState === WebSocket.CLOSED) {
-      connect();
+    // Iniciar simulación automáticamente al montar (modo por defecto para hackathon)
+    if (!simulatorRef.current && useSimulation) {
+      startSimulation();
     }
 
     // Cleanup
@@ -938,9 +1007,12 @@ export default function ThermalViewer() {
         }
         wsRef.current = null;
       }
+      if (simulatorRef.current) {
+        simulatorRef.current.stop();
+      }
       isConnectingRef.current = false;
     };
-  }, [connect]);
+  }, [startSimulation, useSimulation]);
 
   const handleCapture = () => {
     if (!lastFrameRef.current) return;
@@ -969,11 +1041,11 @@ export default function ThermalViewer() {
   };
 
   const handleConfirm = () => {
-    // Verificar si las zonas de interés están definidas
+    // Nota: Las zonas de interés ahora tienen valores por defecto hardcodeados para demo
+    // Si no hay calibración guardada, se usarán automáticamente los valores por defecto
     const savedCalibration = localStorage.getItem('roiCalibration');
     if (!savedCalibration) {
-      alert('⚠️ Las zonas de interés no están definidas. Por favor, define las áreas de interés antes de confirmar.');
-      return;
+      console.log('Usando valores por defecto para las zonas de interés (demo)');
     }
 
     // Aquí puedes agregar lógica para procesar las capturas
@@ -1065,16 +1137,37 @@ export default function ThermalViewer() {
         <div className="connection-status">
           <div className={`status-indicator ${connected ? 'connected' : isConnecting ? 'connecting' : 'disconnected'}`} />
           <span>
-            {connected ? 'Conectado' : isConnecting ? 'Conectando...' : 'Desconectado'}
+            {useSimulation ? 'Simulación Local' : connected ? 'Conectado' : isConnecting ? 'Conectando...' : 'Desconectado'}
           </span>
-          {!connected && (
-            <button 
-              onClick={handleReconnect} 
-              className="reconnect-btn"
-              disabled={isConnecting}
-            >
-              {isConnecting ? 'Conectando...' : 'Reconectar'}
-            </button>
+          {!connected && !isConnecting && (
+            <>
+              {useSimulation && (
+                <button 
+                  onClick={handleReconnect} 
+                  className="reconnect-btn"
+                  disabled={isConnecting}
+                  title="Conectar al servidor real (opcional)"
+                >
+                  Conectar Servidor
+                </button>
+              )}
+              {!useSimulation && (
+                <button 
+                  onClick={handleReconnect} 
+                  className="reconnect-btn"
+                  disabled={isConnecting}
+                >
+                  Reconectar
+                </button>
+              )}
+              <button 
+                onClick={useSimulation ? stopSimulation : startSimulation} 
+                className={`simulation-btn ${useSimulation ? 'active' : ''}`}
+                title={useSimulation ? 'Detener simulación local' : 'Activar simulación local del sensor MLX'}
+              >
+                {useSimulation ? 'Detener Simulación' : 'Activar Simulación'}
+              </button>
+            </>
           )}
         </div>
         
@@ -1093,7 +1186,7 @@ export default function ThermalViewer() {
               setSimulationMode(newMode);
             }}
             className={`simulation-toggle ${simulationMode === 'alta_diferencia' ? 'active' : ''}`}
-            disabled={!connected}
+            disabled={!connected && !useSimulation}
             title="Modo de simulación"
           >
             {simulationMode === 'baja_diferencia' ? 'Baja Dif.' : 'Alta Dif.'}

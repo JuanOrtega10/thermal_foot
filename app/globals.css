@@ -135,6 +135,36 @@ body {
   cursor: not-allowed;
 }
 
+.simulation-btn {
+  margin-left: 0.5rem;
+  padding: 0.5rem 1rem;
+  background-color: #10b981;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 0.875rem;
+  transition: all 0.2s;
+}
+
+.simulation-btn:hover {
+  background-color: #059669;
+  transform: translateY(-1px);
+}
+
+.simulation-btn:active {
+  transform: scale(0.98);
+}
+
+.simulation-btn.active {
+  background-color: #ef4444;
+}
+
+.simulation-btn.active:hover {
+  background-color: #dc2626;
+}
+
 .error-message {
   display: flex;
   align-items: center;
