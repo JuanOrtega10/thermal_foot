@@ -111,7 +111,9 @@ function cleanMaskKMeans(
 }
 
 /**
- * Segmenta el pie del fondo usando K-means clustering (K=2)
+ * Segmenta el pie del fondo usando K-means clustering mejorado (K=2)
+ * Usa información espacial y umbrales de temperatura para evitar que segmentos del pie
+ * sean clasificados como fondo.
  * @param data Array de temperaturas
  * @param rows Número de filas
  * @param cols Número de columnas
@@ -129,17 +131,91 @@ export function segmentFootKMeans(
   
   if (n === 0) return [];
   
-  // Inicialización inteligente: usar percentiles para los centroides iniciales
-  const sorted = [...frame].sort((a, b) => a - b);
-  const p25 = sorted[Math.floor(n * 0.25)];
-  const p75 = sorted[Math.floor(n * 0.75)];
+  // Paso 1: Identificar fondo usando SOLO píxeles del borde
+  // El fondo en los bordes es consistente independientemente del modo de simulación
+  const edgeThreshold = 2; // Píxeles desde el borde considerados "borde"
+  const edgeTemps: number[] = [];
   
-  // Centroides iniciales: uno para fondo (frío) y uno para pie (caliente)
-  let centroidCold = p25;  // Percentil 25 (fondo esperado)
-  let centroidHot = p75;   // Percentil 75 (pie esperado)
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const isEdge = row < edgeThreshold || row >= rows - edgeThreshold ||
+                     col < edgeThreshold || col >= cols - edgeThreshold;
+      if (isEdge) {
+        const idx = row * cols + col;
+        edgeTemps.push(frame[idx]);
+      }
+    }
+  }
   
-  // K-means iterativo
+  // Calcular estadísticas del fondo basadas SOLO en los bordes
+  edgeTemps.sort((a, b) => a - b);
+  const edgeMin = edgeTemps[0];
+  const edgeMax = edgeTemps[edgeTemps.length - 1];
+  const edgeMedian = edgeTemps[Math.floor(edgeTemps.length / 2)];
+  const edgeP10 = edgeTemps[Math.floor(edgeTemps.length * 0.10)];
+  
+  // Umbral de fondo basado en los bordes (más robusto)
+  const backgroundThreshold = edgeP10 + (edgeMedian - edgeP10) * 0.5;
+  
+  // Identificar píxeles que definitivamente son fondo
+  const definitelyBackground = new Array<boolean>(n).fill(false);
+  
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const idx = row * cols + col;
+      const temp = frame[idx];
+      const isEdge = row < edgeThreshold || row >= rows - edgeThreshold ||
+                     col < edgeThreshold || col >= cols - edgeThreshold;
+      
+      // Si está en el borde Y es frío según umbral de borde, es definitivamente fondo
+      if (isEdge && temp <= backgroundThreshold) {
+        definitelyBackground[idx] = true;
+      }
+    }
+  }
+  
+  // Paso 2: Calcular centroides iniciales
+  // Fondo: usar solo píxeles definitivamente fondo
+  // Pie: usar píxeles que están claramente por encima del umbral de fondo
+  let sumCold = 0, countCold = 0;
+  let sumHot = 0, countHot = 0;
+  
+  // Umbral para pie: al menos 2°C más caliente que el umbral de fondo
+  const footThreshold = backgroundThreshold + 2.0;
+  
+  for (let i = 0; i < n; i++) {
+    if (definitelyBackground[i]) {
+      sumCold += frame[i];
+      countCold++;
+    } else if (frame[i] >= footThreshold) {
+      sumHot += frame[i];
+      countHot++;
+    }
+  }
+  
+  // Centroides iniciales basados en bordes (más robustos)
+  let centroidCold = countCold > 0 ? sumCold / countCold : edgeMedian;
+  let centroidHot = countHot > 0 ? sumHot / countHot : footThreshold;
+  
+  // Si los centroides están muy cerca, ajustar para asegurar separación
+  if (Math.abs(centroidHot - centroidCold) < 1.5) {
+    centroidCold = edgeMedian;
+    centroidHot = edgeMedian + 3.0; // Asegurar separación mínima de 3°C
+  }
+  
+  // Paso 3: K-means iterativo con pesos espaciales
   let assignments = new Array<number>(n);
+  
+  // Inicializar: forzar píxeles definitivamente fondo al cluster frío
+  for (let i = 0; i < n; i++) {
+    if (definitelyBackground[i]) {
+      assignments[i] = 0; // Cluster frío (fondo)
+    } else {
+      // Inicializar basado en temperatura
+      assignments[i] = frame[i] >= (centroidCold + centroidHot) / 2 ? 1 : 0;
+    }
+  }
+  
   let changed = true;
   let iterations = 0;
   
@@ -147,9 +223,23 @@ export function segmentFootKMeans(
     changed = false;
     
     // Asignar cada píxel al centroide más cercano
+    // Pero con peso espacial: píxeles en bordes tienen más probabilidad de ser fondo
     for (let i = 0; i < n; i++) {
+      // No cambiar píxeles definitivamente fondo
+      if (definitelyBackground[i]) continue;
+      
+      const row = Math.floor(i / cols);
+      const col = i % cols;
       const temp = frame[i];
-      const distToCold = Math.abs(temp - centroidCold);
+      
+      // Calcular distancia con peso espacial
+      const isEdge = row < edgeThreshold || row >= rows - edgeThreshold ||
+                        col < edgeThreshold || col >= cols - edgeThreshold;
+      
+      // Peso espacial: píxeles en bordes tienen sesgo hacia fondo
+      const spatialBias = isEdge ? 0.5 : 0; // Sesgo de 0.5°C hacia fondo en bordes
+      
+      const distToCold = Math.abs(temp - centroidCold) - spatialBias;
       const distToHot = Math.abs(temp - centroidHot);
       
       const newAssignment = distToCold < distToHot ? 0 : 1;
@@ -161,8 +251,10 @@ export function segmentFootKMeans(
     }
     
     // Recalcular centroides (promedio de temperaturas en cada cluster)
-    let sumCold = 0, countCold = 0;
-    let sumHot = 0, countHot = 0;
+    sumCold = 0;
+    countCold = 0;
+    sumHot = 0;
+    countHot = 0;
     
     for (let i = 0; i < n; i++) {
       if (assignments[i] === 0) {
@@ -185,7 +277,7 @@ export function segmentFootKMeans(
     iterations++;
   }
   
-  // Determinar cuál cluster es el pie (el más caliente)
+  // Paso 4: Determinar cuál cluster es el pie (el más caliente)
   const footCluster = centroidHot > centroidCold ? 1 : 0;
   
   // Crear máscara: true = pie, false = fondo
@@ -194,8 +286,69 @@ export function segmentFootKMeans(
     mask[i] = assignments[i] === footCluster;
   }
   
-  // Limpieza opcional: eliminar píxeles aislados
-  return cleanMaskKMeans(mask, rows, cols);
+  // Paso 5: Post-procesamiento mejorado
+  // Identificar la región más grande conectada como el pie
+  const cleaned = cleanMaskKMeans(mask, rows, cols);
+  
+  // Encontrar la componente conectada más grande (debería ser el pie)
+  const visited = new Array<boolean>(n).fill(false);
+  const components: number[][] = [];
+  
+  for (let i = 0; i < n; i++) {
+    if (cleaned[i] && !visited[i]) {
+      const component: number[] = [];
+      const stack = [i];
+      
+      while (stack.length > 0) {
+        const idx = stack.pop()!;
+        if (visited[idx] || !cleaned[idx]) continue;
+        
+        visited[idx] = true;
+        component.push(idx);
+        
+        const row = Math.floor(idx / cols);
+        const col = idx % cols;
+        
+        // Vecinos 4-conectados
+        const neighbors = [
+          [row - 1, col],
+          [row + 1, col],
+          [row, col - 1],
+          [row, col + 1],
+        ];
+        
+        for (const [nr, nc] of neighbors) {
+          if (nr >= 0 && nr < rows && nc >= 0 && nc < cols) {
+            const nIdx = nr * cols + nc;
+            if (cleaned[nIdx] && !visited[nIdx]) {
+              stack.push(nIdx);
+            }
+          }
+        }
+      }
+      
+      if (component.length > 0) {
+        components.push(component);
+      }
+    }
+  }
+  
+  // Si hay múltiples componentes, mantener solo la más grande (el pie)
+  if (components.length > 1) {
+    components.sort((a, b) => b.length - a.length);
+    const largestComponent = components[0];
+    const largestComponentSet = new Set(largestComponent);
+    
+    // Crear máscara final solo con la componente más grande
+    const finalMask = new Array<boolean>(n).fill(false);
+    for (const idx of largestComponent) {
+      finalMask[idx] = true;
+    }
+    
+    return finalMask;
+  }
+  
+  return cleaned;
 }
 
 // ==================== ROI Calibration System ====================
@@ -206,9 +359,6 @@ export interface NormalizedROI {
   maxRowNorm: number;
   minColNorm: number;  // 0 = left del bounding box, 1 = right
   maxColNorm: number;
-  // Offset relativo al centro de masa (para ajuste fino)
-  centerMassOffsetRow: number;  // En píxeles relativos
-  centerMassOffsetCol: number;
 }
 
 export interface ROICalibration {
@@ -220,7 +370,6 @@ export interface ROICalibration {
     footSide: 'izquierdo' | 'derecho';
     footHeight: number;
     footWidth: number;
-    centerMass: { row: number; col: number };
   };
 }
 
@@ -244,31 +393,164 @@ export interface FootROIs {
 }
 
 /**
- * Calcula el bounding box del pie segmentado
+ * Encuentra píxeles conectados (con al menos un vecino)
+ */
+function getConnectedPixels(
+  footMask: boolean[],
+  rows: number,
+  cols: number
+): boolean[] {
+  const connected = new Array<boolean>(rows * cols).fill(false);
+
+  for (let row = 1; row < rows - 1; row++) {
+    for (let col = 1; col < cols - 1; col++) {
+      const idx = row * cols + col;
+      if (!footMask[idx]) continue;
+
+      // Verificar si tiene al menos un vecino (4-vecindad)
+      let hasNeighbor = false;
+      for (let dr = -1; dr <= 1; dr += 2) {
+        const nIdx = (row + dr) * cols + col;
+        if (footMask[nIdx]) {
+          hasNeighbor = true;
+          break;
+        }
+      }
+      if (!hasNeighbor) {
+        for (let dc = -1; dc <= 1; dc += 2) {
+          const nIdx = row * cols + (col + dc);
+          if (footMask[nIdx]) {
+            hasNeighbor = true;
+            break;
+          }
+        }
+      }
+
+      if (hasNeighbor) {
+        connected[idx] = true;
+      }
+    }
+  }
+
+  // También incluir píxeles del borde si están conectados
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const idx = row * cols + col;
+      if (footMask[idx] && !connected[idx]) {
+        // Verificar si tiene vecino en el borde
+        for (let dr = -1; dr <= 1; dr++) {
+          for (let dc = -1; dc <= 1; dc++) {
+            if (dr === 0 && dc === 0) continue;
+            const nRow = row + dr;
+            const nCol = col + dc;
+            if (nRow >= 0 && nRow < rows && nCol >= 0 && nCol < cols) {
+              const nIdx = nRow * cols + nCol;
+              if (footMask[nIdx] && (connected[nIdx] || (nRow > 0 && nRow < rows - 1 && nCol > 0 && nCol < cols - 1))) {
+                connected[idx] = true;
+                break;
+              }
+            }
+          }
+          if (connected[idx]) break;
+        }
+      }
+    }
+  }
+
+  return connected;
+}
+
+/**
+ * Calcula el bounding box del pie segmentado mejorado
+ * Identifica los puntos extremos reales del pie (dedos y talón)
  */
 export function getFootBoundingBox(
   footMask: boolean[],
   rows: number,
   cols: number
 ): { minRow: number; maxRow: number; minCol: number; maxCol: number } | null {
-  let minRow = rows, maxRow = -1;
-  let minCol = cols, maxCol = -1;
-  let found = false;
+  // Primero, obtener solo píxeles conectados (eliminar ruido aislado)
+  const connectedMask = getConnectedPixels(footMask, rows, cols);
 
+  // Encontrar el punto más alto (dedos/hallux) - minRow
+  // Buscar desde arriba hacia abajo, encontrar la primera fila con píxeles significativos
+  let minRow = rows;
   for (let row = 0; row < rows; row++) {
+    let pixelCount = 0;
     for (let col = 0; col < cols; col++) {
       const idx = row * cols + col;
-      if (footMask[idx]) {
-        found = true;
-        if (row < minRow) minRow = row;
-        if (row > maxRow) maxRow = row;
+      if (connectedMask[idx]) {
+        pixelCount++;
+      }
+    }
+    // Si hay al menos 2 píxeles conectados en esta fila, es parte del pie
+    if (pixelCount >= 2) {
+      minRow = row;
+      break;
+    }
+  }
+
+  // Encontrar el punto más bajo (talón) - maxRow
+  // Buscar desde abajo hacia arriba
+  let maxRow = -1;
+  for (let row = rows - 1; row >= 0; row--) {
+    let pixelCount = 0;
+    for (let col = 0; col < cols; col++) {
+      const idx = row * cols + col;
+      if (connectedMask[idx]) {
+        pixelCount++;
+      }
+    }
+    // Si hay al menos 2 píxeles conectados en esta fila, es parte del pie
+    if (pixelCount >= 2) {
+      maxRow = row;
+      break;
+    }
+  }
+
+  // Encontrar los puntos más a la izquierda y derecha
+  // Usar solo las filas que están en el rango del pie
+  let minCol = cols;
+  let maxCol = -1;
+
+  if (minRow <= maxRow) {
+    // Para cada columna, verificar si tiene píxeles en el rango del pie
+    for (let col = 0; col < cols; col++) {
+      let hasPixel = false;
+      for (let row = minRow; row <= maxRow; row++) {
+        const idx = row * cols + col;
+        if (connectedMask[idx]) {
+          hasPixel = true;
+          break;
+        }
+      }
+      if (hasPixel) {
         if (col < minCol) minCol = col;
         if (col > maxCol) maxCol = col;
       }
     }
   }
 
-  if (!found) return null;
+  // Fallback: si no encontramos nada con el método mejorado, usar el método simple
+  if (minRow >= rows || maxRow < 0 || minCol >= cols || maxCol < 0) {
+    // Método simple como fallback
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const idx = row * cols + col;
+        if (footMask[idx]) {
+          if (row < minRow) minRow = row;
+          if (row > maxRow) maxRow = row;
+          if (col < minCol) minCol = col;
+          if (col > maxCol) maxCol = col;
+        }
+      }
+    }
+  }
+
+  if (minRow >= rows || maxRow < 0 || minCol >= cols || maxCol < 0) {
+    return null;
+  }
+
   return { minRow, maxRow, minCol, maxCol };
 }
 
@@ -302,14 +584,10 @@ export function getFootCenterOfMass(
  */
 export function normalizeCoordinates(
   pixelCoords: ROISelection,
-  bbox: { minRow: number; maxRow: number; minCol: number; maxCol: number },
-  centerMass: { row: number; col: number }
+  bbox: { minRow: number; maxRow: number; minCol: number; maxCol: number }
 ): NormalizedROI {
   const footHeight = bbox.maxRow - bbox.minRow + 1;
   const footWidth = bbox.maxCol - bbox.minCol + 1;
-
-  const centerRow = (pixelCoords.minRow + pixelCoords.maxRow) / 2;
-  const centerCol = (pixelCoords.minCol + pixelCoords.maxCol) / 2;
 
   return {
     // Normalizar al bounding box (0-1)
@@ -317,38 +595,45 @@ export function normalizeCoordinates(
     maxRowNorm: (pixelCoords.maxRow - bbox.minRow) / footHeight,
     minColNorm: (pixelCoords.minCol - bbox.minCol) / footWidth,
     maxColNorm: (pixelCoords.maxCol - bbox.minCol) / footWidth,
-    // Offset relativo al centro de masa (normalizado)
-    centerMassOffsetRow: centerRow - centerMass.row,
-    centerMassOffsetCol: centerCol - centerMass.col,
   };
 }
 
 /**
  * Desnormaliza coordenadas relativas a píxeles absolutos
+ * @param invertHorizontal Si es true, invierte las coordenadas horizontalmente (eje X)
  */
 export function denormalizeCoordinates(
   normalizedROI: NormalizedROI,
   bbox: { minRow: number; maxRow: number; minCol: number; maxCol: number },
-  centerMass: { row: number; col: number }
+  invertHorizontal: boolean = false
 ): ROISelection {
   const footHeight = bbox.maxRow - bbox.minRow + 1;
   const footWidth = bbox.maxCol - bbox.minCol + 1;
 
-  // Calcular centro de la ROI usando offset del centro de masa
-  const centerRow = centerMass.row + normalizedROI.centerMassOffsetRow;
-  const centerCol = centerMass.col + normalizedROI.centerMassOffsetCol;
+  let minColNorm = normalizedROI.minColNorm;
+  let maxColNorm = normalizedROI.maxColNorm;
 
-  // Calcular tamaño de la ROI
-  const roiHeight = (normalizedROI.maxRowNorm - normalizedROI.minRowNorm) * footHeight;
-  const roiWidth = (normalizedROI.maxColNorm - normalizedROI.minColNorm) * footWidth;
+  // Si hay que invertir horizontalmente, reflejar las coordenadas X
+  if (invertHorizontal) {
+    // Invertir: 1 - valor para reflejar horizontalmente
+    const tempMinCol = minColNorm;
+    minColNorm = 1 - maxColNorm;
+    maxColNorm = 1 - tempMinCol;
+  }
 
-  // Calcular límites absolutos
-  const minRow = Math.max(bbox.minRow, Math.floor(centerRow - roiHeight / 2));
-  const maxRow = Math.min(bbox.maxRow, Math.floor(centerRow + roiHeight / 2));
-  const minCol = Math.max(bbox.minCol, Math.floor(centerCol - roiWidth / 2));
-  const maxCol = Math.min(bbox.maxCol, Math.floor(centerCol + roiWidth / 2));
+  // Calcular límites absolutos usando porcentajes normalizados
+  const minRow = bbox.minRow + Math.floor(normalizedROI.minRowNorm * footHeight);
+  const maxRow = bbox.minRow + Math.floor(normalizedROI.maxRowNorm * footHeight);
+  const minCol = bbox.minCol + Math.floor(minColNorm * footWidth);
+  const maxCol = bbox.minCol + Math.floor(maxColNorm * footWidth);
 
-  return { minRow, maxRow, minCol, maxCol };
+  // Asegurarse de que no se salgan del bounding box
+  return {
+    minRow: Math.max(bbox.minRow, minRow),
+    maxRow: Math.min(bbox.maxRow, maxRow),
+    minCol: Math.max(bbox.minCol, minCol),
+    maxCol: Math.min(bbox.maxCol, maxCol),
+  };
 }
 
 /**
@@ -377,14 +662,93 @@ export function applyROICalibration(
   if (!calibration) return null;
 
   const bbox = getFootBoundingBox(footMask, rows, cols);
-  const centerMass = getFootCenterOfMass(footMask, rows, cols);
   
-  if (!bbox || !centerMass) return null;
+  if (!bbox) return null;
 
-  // Desnormalizar cada ROI
-  const halluxCoords = denormalizeCoordinates(calibration.hallux, bbox, centerMass);
-  const metatarsalCoords = denormalizeCoordinates(calibration.firstMetatarsal, bbox, centerMass);
-  const heelCoords = denormalizeCoordinates(calibration.heel, bbox, centerMass);
+  // Desnormalizar cada ROI primero sin invertir
+  const halluxCoords = denormalizeCoordinates(calibration.hallux, bbox, false);
+  const metatarsalCoords = denormalizeCoordinates(calibration.firstMetatarsal, bbox, false);
+  const heelCoords = denormalizeCoordinates(calibration.heel, bbox, false);
+
+  // Determinar si necesitamos invertir basándonos en la posición del hallux
+  // El hallux debe estar siempre en el lado correcto según el pie:
+  // - Pie izquierdo: hallux en el lado izquierdo del pie (col < bboxCenterCol)
+  // - Pie derecho: hallux en el lado derecho del pie (col >= bboxCenterCol)
+  const halluxCenterCol = (halluxCoords.minCol + halluxCoords.maxCol) / 2;
+  const bboxCenterCol = (bbox.minCol + bbox.maxCol) / 2;
+  const halluxIsOnLeft = halluxCenterCol < bboxCenterCol;
+  
+  // Determinar dónde debería estar el hallux según el pie actual
+  const shouldHalluxBeOnLeft = footSide === 'izquierdo';
+  
+  // Invertir si el hallux no está en el lado correcto
+  // Usar un margen pequeño para evitar inversiones innecesarias cuando está muy cerca del centro
+  const shouldInvert = halluxIsOnLeft !== shouldHalluxBeOnLeft;
+
+  // Si hay que invertir, invertir literalmente el eje X de toda la imagen
+  if (shouldInvert) {
+    // Invertir las coordenadas X reflejándolas a través del centro de la imagen completa
+    const invertX = (col: number) => cols - 1 - col;
+    
+    const invertCoords = (coords: ROISelection): ROISelection => {
+      const newMinCol = invertX(coords.maxCol);
+      const newMaxCol = invertX(coords.minCol);
+      return {
+        minRow: coords.minRow,
+        maxRow: coords.maxRow,
+        minCol: Math.min(newMinCol, newMaxCol),
+        maxCol: Math.max(newMinCol, newMaxCol),
+      };
+    };
+
+    // Aplicar inversión a cada ROI
+    const tempHallux = invertCoords(halluxCoords);
+    const tempMetatarsal = invertCoords(metatarsalCoords);
+    const tempHeel = invertCoords(heelCoords);
+    
+    // Actualizar coordenadas
+    halluxCoords.minCol = tempHallux.minCol;
+    halluxCoords.maxCol = tempHallux.maxCol;
+    metatarsalCoords.minCol = tempMetatarsal.minCol;
+    metatarsalCoords.maxCol = tempMetatarsal.maxCol;
+    heelCoords.minCol = tempHeel.minCol;
+    heelCoords.maxCol = tempHeel.maxCol;
+  }
+
+  // Verificación final: asegurar que el hallux esté en el lado correcto
+  // Recalcular el centro del bounding box después de la inversión
+  const finalBboxCenterCol = (bbox.minCol + bbox.maxCol) / 2;
+  const finalHalluxCenterCol = (halluxCoords.minCol + halluxCoords.maxCol) / 2;
+  const finalHalluxIsOnLeft = finalHalluxCenterCol < finalBboxCenterCol;
+  const finalShouldHalluxBeOnLeft = footSide === 'izquierdo';
+  
+  // Si después de la inversión el hallux aún no está en el lado correcto, forzar la inversión
+  if (finalHalluxIsOnLeft !== finalShouldHalluxBeOnLeft) {
+    const invertX = (col: number) => cols - 1 - col;
+    
+    const invertCoords = (coords: ROISelection): ROISelection => {
+      const newMinCol = invertX(coords.maxCol);
+      const newMaxCol = invertX(coords.minCol);
+      return {
+        minRow: coords.minRow,
+        maxRow: coords.maxRow,
+        minCol: Math.min(newMinCol, newMaxCol),
+        maxCol: Math.max(newMinCol, newMaxCol),
+      };
+    };
+
+    // Aplicar inversión forzada
+    const tempHallux = invertCoords(halluxCoords);
+    const tempMetatarsal = invertCoords(metatarsalCoords);
+    const tempHeel = invertCoords(heelCoords);
+    
+    halluxCoords.minCol = tempHallux.minCol;
+    halluxCoords.maxCol = tempHallux.maxCol;
+    metatarsalCoords.minCol = tempMetatarsal.minCol;
+    metatarsalCoords.maxCol = tempMetatarsal.maxCol;
+    heelCoords.minCol = tempHeel.minCol;
+    heelCoords.maxCol = tempHeel.maxCol;
+  }
 
   // Crear máscaras
   const halluxMask = new Array<boolean>(rows * cols).fill(false);
@@ -423,17 +787,20 @@ export function applyROICalibration(
 
 /**
  * Calcula estadísticas de temperatura para una ROI específica
+ * Solo considera píxeles que están tanto en la ROI como en el pie (no el fondo)
  */
 export function getROIStats(
   data: number[],
   roiMask: boolean[],
+  footMask: boolean[],
   rows: number,
   cols: number
 ): { min: number; max: number; avg: number; count: number } | null {
   const temps: number[] = [];
   
+  // Solo considerar píxeles que están en la ROI Y en el pie (no en el fondo)
   for (let i = 0; i < data.length; i++) {
-    if (roiMask[i]) {
+    if (roiMask[i] && footMask[i]) {
       temps.push(data[i]);
     }
   }

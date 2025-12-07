@@ -6,12 +6,12 @@ import {
   calculateStats, 
   segmentFootKMeans,
   getFootBoundingBox,
-  getFootCenterOfMass,
   normalizeCoordinates,
   applyROICalibration,
   type ROICalibration,
   type ROISelection
 } from '@/lib/utils';
+import DashboardScreen from './DashboardScreen';
 
 interface ThermalData {
   rows: number;
@@ -55,7 +55,6 @@ function ROICalibrationCanvas({
   const frame = new Float32Array(frameData);
   const footMask = segmentFootKMeans(frameData, rows, cols);
   const bbox = getFootBoundingBox(footMask, rows, cols);
-  const centerMass = getFootCenterOfMass(footMask, rows, cols);
 
   const pixelSize = 16;
 
@@ -98,7 +97,7 @@ function ROICalibrationCanvas({
   };
 
   const handleMouseUp = () => {
-    if (!isSelecting || !startPos || !currentPos || !currentROI || !bbox || !centerMass) return;
+    if (!isSelecting || !startPos || !currentPos || !currentROI || !bbox) return;
 
     const selection: ROISelection = {
       minRow: Math.min(startPos.row, currentPos.row),
@@ -114,17 +113,16 @@ function ROICalibrationCanvas({
   };
 
   const handleSaveCalibration = () => {
-    if (!bbox || !centerMass || !selections.hallux || !selections.firstMetatarsal || !selections.heel) return;
+    if (!bbox || !selections.hallux || !selections.firstMetatarsal || !selections.heel) return;
 
     const calibration: ROICalibration = {
-      hallux: normalizeCoordinates(selections.hallux, bbox, centerMass),
-      firstMetatarsal: normalizeCoordinates(selections.firstMetatarsal, bbox, centerMass),
-      heel: normalizeCoordinates(selections.heel, bbox, centerMass),
+      hallux: normalizeCoordinates(selections.hallux, bbox),
+      firstMetatarsal: normalizeCoordinates(selections.firstMetatarsal, bbox),
+      heel: normalizeCoordinates(selections.heel, bbox),
       calibratedOn: {
         footSide,
         footHeight: bbox.maxRow - bbox.minRow + 1,
         footWidth: bbox.maxCol - bbox.minCol + 1,
-        centerMass,
       },
     };
 
@@ -160,11 +158,11 @@ function ROICalibrationCanvas({
       }
     }
 
-    // Dibujar selecciones existentes
+    // Dibujar selecciones existentes con colores contrastantes
     const colors = {
-      hallux: 'rgba(255, 0, 0, 0.4)',
-      firstMetatarsal: 'rgba(0, 255, 0, 0.4)',
-      heel: 'rgba(0, 0, 255, 0.4)',
+      hallux: 'rgba(255, 255, 0, 0.3)',      // Amarillo
+      firstMetatarsal: 'rgba(0, 255, 255, 0.3)', // Cyan
+      heel: 'rgba(255, 0, 255, 0.3)',        // Magenta
     };
 
     Object.entries(selections).forEach(([roi, selection]) => {
@@ -186,7 +184,7 @@ function ROICalibrationCanvas({
         minCol: Math.min(startPos.col, currentPos.col),
         maxCol: Math.max(startPos.col, currentPos.col),
       };
-      ctx.fillStyle = colors[currentROI as keyof typeof colors] || 'rgba(255, 255, 0, 0.4)';
+      ctx.fillStyle = colors[currentROI as keyof typeof colors] || 'rgba(255, 255, 0, 0.3)';
       ctx.fillRect(
         selection.minCol * pixelSize,
         selection.minRow * pixelSize,
@@ -317,19 +315,31 @@ function CapturedCanvas({
 
     // Dibujar ROIs si están disponibles
     if (rois) {
-      const roiColors = {
-        hallux: 'rgba(255, 0, 0, 0.3)',
-        firstMetatarsal: 'rgba(0, 255, 0, 0.3)',
-        heel: 'rgba(0, 0, 255, 0.3)',
+      // Colores de borde contrastantes que funcionan sobre cualquier fondo
+      const roiBorderColors = {
+        hallux: '#FFFF00',      // Amarillo brillante - contrasta con rojo/azul
+        firstMetatarsal: '#00FFFF', // Cyan brillante - contrasta con rojo/verde
+        heel: '#FF00FF',        // Magenta brillante - contrasta con verde/azul
+      };
+      
+      // Relleno muy sutil con patrón de rayas
+      const roiFillColors = {
+        hallux: 'rgba(255, 255, 0, 0.15)',      // Amarillo muy transparente
+        firstMetatarsal: 'rgba(0, 255, 255, 0.15)', // Cyan muy transparente
+        heel: 'rgba(255, 0, 255, 0.15)',        // Magenta muy transparente
       };
 
-      // Dibujar cada ROI
+      // Dibujar cada ROI con borde y relleno
       Object.entries({
         hallux: rois.hallux,
         firstMetatarsal: rois.firstMetatarsal,
         heel: rois.heel,
       }).forEach(([roiName, roiMask]) => {
-        ctx.fillStyle = roiColors[roiName as keyof typeof roiColors];
+        const borderColor = roiBorderColors[roiName as keyof typeof roiBorderColors];
+        const fillColor = roiFillColors[roiName as keyof typeof roiFillColors];
+        
+        // Primero dibujar el relleno sutil
+        ctx.fillStyle = fillColor;
         for (let row = 0; row < rows; row++) {
           for (let col = 0; col < cols; col++) {
             const idx = row * cols + col;
@@ -338,6 +348,48 @@ function CapturedCanvas({
               const y = row * pixelSize;
               ctx.fillRect(x, y, pixelSize - borderWidth, pixelSize - borderWidth);
             }
+          }
+        }
+        
+        // Luego dibujar los bordes contrastantes
+        ctx.strokeStyle = borderColor;
+        ctx.lineWidth = 2;
+        ctx.lineJoin = 'miter';
+        
+        // Dibujar bordes de manera más eficiente: solo los bordes externos de la ROI
+        for (let row = 0; row < rows; row++) {
+          for (let col = 0; col < cols; col++) {
+            const idx = row * cols + col;
+            if (!roiMask[idx]) continue;
+            
+            const x = col * pixelSize;
+            const y = row * pixelSize;
+            ctx.beginPath();
+            
+            // Verificar cada lado y dibujar solo si es un borde
+            const topEdge = row === 0 || !roiMask[(row - 1) * cols + col];
+            const bottomEdge = row === rows - 1 || !roiMask[(row + 1) * cols + col];
+            const leftEdge = col === 0 || !roiMask[row * cols + (col - 1)];
+            const rightEdge = col === cols - 1 || !roiMask[row * cols + (col + 1)];
+            
+            if (topEdge) {
+              ctx.moveTo(x, y);
+              ctx.lineTo(x + pixelSize - borderWidth, y);
+            }
+            if (bottomEdge) {
+              ctx.moveTo(x, y + pixelSize - borderWidth);
+              ctx.lineTo(x + pixelSize - borderWidth, y + pixelSize - borderWidth);
+            }
+            if (leftEdge) {
+              ctx.moveTo(x, y);
+              ctx.lineTo(x, y + pixelSize - borderWidth);
+            }
+            if (rightEdge) {
+              ctx.moveTo(x + pixelSize - borderWidth, y);
+              ctx.lineTo(x + pixelSize - borderWidth, y + pixelSize - borderWidth);
+            }
+            
+            ctx.stroke();
           }
         }
       });
@@ -365,6 +417,7 @@ export default function ThermalViewer() {
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [showCalibration, setShowCalibration] = useState(false);
   const [calibrationFoot, setCalibrationFoot] = useState<'izquierdo' | 'derecho' | null>(null);
+  const [showDashboard, setShowDashboard] = useState(false);
   
   // Refs para estadísticas que no necesitan re-render
   const frameCountRef = useRef(0);
@@ -817,13 +870,18 @@ export default function ThermalViewer() {
   };
 
   const handleConfirm = () => {
+    // Verificar si las zonas de interés están definidas
+    const savedCalibration = localStorage.getItem('roiCalibration');
+    if (!savedCalibration) {
+      alert('⚠️ Las zonas de interés no están definidas. Por favor, define las áreas de interés antes de confirmar.');
+      return;
+    }
+
     // Aquí puedes agregar lógica para procesar las capturas
     console.log('Capturas confirmadas:', { left: capturedLeft, right: capturedRight });
     setShowConfirmation(false);
-    // Resetear capturas
-    setCapturedLeft(null);
-    setCapturedRight(null);
-    setFoot('izquierdo');
+    // Mostrar dashboard
+    setShowDashboard(true);
   };
 
   const handleReconnect = () => {
@@ -857,6 +915,23 @@ export default function ThermalViewer() {
     footRef.current = foot;
     connect();
   };
+
+  // Mostrar dashboard si está activo
+  if (showDashboard) {
+    return (
+      <DashboardScreen
+        capturedLeft={capturedLeft}
+        capturedRight={capturedRight}
+        tempRange={tempRange}
+        onBack={() => {
+          setShowDashboard(false);
+          setCapturedLeft(null);
+          setCapturedRight(null);
+          setFoot('izquierdo');
+        }}
+      />
+    );
+  }
 
   return (
     <div className="thermal-viewer">
