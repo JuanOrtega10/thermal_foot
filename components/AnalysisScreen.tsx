@@ -240,6 +240,12 @@ export default function AnalysisScreen({
   const [isProcessingNotes, setIsProcessingNotes] = useState(false);
   const [notesGenerated, setNotesGenerated] = useState(false);
   const [processingError, setProcessingError] = useState<string | null>(null);
+  const [isEditingNotes, setIsEditingNotes] = useState(false);
+  const [checklistItems, setChecklistItems] = useState({
+    examenCompletado: true,
+    educacionBrindada: true,
+    seguimientoAgendado: false,
+  });
 
   // Procesar audio cuando se detiene la grabación
   const processRecording = async (audioBlob: Blob) => {
@@ -689,7 +695,7 @@ export default function AnalysisScreen({
                   {isProcessingNotes ? 'Procesando...' : 'Detener y Generar Notas'}
                 </button>
               )}
-              {!isRecording && recordingBlob && !notesGenerated && (
+              {!isRecording && recordingBlob && !notesGenerated && !isEditingNotes && (
                 <button 
                   className="notes-action-btn generate-notes-btn"
                   onClick={handleStopAndProcess}
@@ -698,7 +704,22 @@ export default function AnalysisScreen({
                   {isProcessingNotes ? 'Procesando...' : 'Generar Notas Clínicas'}
                 </button>
               )}
-              <button className="notes-action-btn">Editar</button>
+              {(notesGenerated || clinicalNotes.trim().length > 0) && (
+                <button 
+                  className="notes-action-btn"
+                  onClick={() => {
+                    if (isEditingNotes) {
+                      // Guardar cambios
+                      setIsEditingNotes(false);
+                    } else {
+                      // Entrar en modo edición
+                      setIsEditingNotes(true);
+                    }
+                  }}
+                >
+                  {isEditingNotes ? 'Guardar' : 'Editar'}
+                </button>
+              )}
             </div>
           </div>
           <div className="clinical-notes-textarea">
@@ -736,7 +757,31 @@ export default function AnalysisScreen({
                   style={{ marginTop: '16px' }}
                 />
               </div>
-            ) : notesGenerated && clinicalNotes ? (
+            ) : isEditingNotes || !notesGenerated ? (
+              <textarea 
+                placeholder={isEditingNotes ? "Edite las notas clínicas..." : "Ingrese observaciones y notas clínicas... o detenga la grabación para generar notas automáticamente"} 
+                value={clinicalNotes}
+                onChange={(e) => setClinicalNotes(e.target.value)}
+                style={{
+                  width: '100%',
+                  minHeight: '200px',
+                  padding: '16px',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: '12px',
+                  fontSize: '16px',
+                  lineHeight: '24px',
+                  fontFamily: 'inherit',
+                  resize: 'vertical',
+                  outline: 'none',
+                }}
+                onFocus={(e) => {
+                  e.target.style.borderColor = '#6c63ff';
+                }}
+                onBlur={(e) => {
+                  e.target.style.borderColor = '#e5e7eb';
+                }}
+              />
+            ) : clinicalNotes ? (
               <div className="clinical-notes-content">
                 <pre style={{ 
                   whiteSpace: 'pre-wrap', 
@@ -759,24 +804,52 @@ export default function AnalysisScreen({
           <div className="clinical-notes-checklist">
             <p className="checklist-title">Lista de Verificación</p>
             <div className="checklist-items">
-              <div className="checklist-item checked">
-                <div className="checkmark">
-                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                    <path d="M2 6L5 9L10 2" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                  </svg>
-                </div>
+              <div 
+                className={`checklist-item ${checklistItems.examenCompletado ? 'checked' : ''}`}
+                onClick={() => setChecklistItems(prev => ({ ...prev, examenCompletado: !prev.examenCompletado }))}
+                style={{ cursor: 'pointer' }}
+              >
+                {checklistItems.examenCompletado ? (
+                  <div className="checkmark">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                      <path d="M2 6L5 9L10 2" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  </div>
+                ) : (
+                  <div className="checkmark-empty"></div>
+                )}
                 <span>Examen de pies completado</span>
               </div>
-              <div className="checklist-item checked">
-                <div className="checkmark">
-                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                    <path d="M2 6L5 9L10 2" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                  </svg>
-                </div>
+              <div 
+                className={`checklist-item ${checklistItems.educacionBrindada ? 'checked' : ''}`}
+                onClick={() => setChecklistItems(prev => ({ ...prev, educacionBrindada: !prev.educacionBrindada }))}
+                style={{ cursor: 'pointer' }}
+              >
+                {checklistItems.educacionBrindada ? (
+                  <div className="checkmark">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                      <path d="M2 6L5 9L10 2" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  </div>
+                ) : (
+                  <div className="checkmark-empty"></div>
+                )}
                 <span>Educación al paciente brindada</span>
               </div>
-              <div className="checklist-item">
-                <div className="checkmark-empty"></div>
+              <div 
+                className={`checklist-item ${checklistItems.seguimientoAgendado ? 'checked' : ''}`}
+                onClick={() => setChecklistItems(prev => ({ ...prev, seguimientoAgendado: !prev.seguimientoAgendado }))}
+                style={{ cursor: 'pointer' }}
+              >
+                {checklistItems.seguimientoAgendado ? (
+                  <div className="checkmark">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                      <path d="M2 6L5 9L10 2" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  </div>
+                ) : (
+                  <div className="checkmark-empty"></div>
+                )}
                 <span>Seguimiento agendado</span>
               </div>
             </div>

@@ -1108,18 +1108,10 @@ export default function ThermalViewer() {
           <div className="metrics-card">
             <h3 className="metrics-title">Métricas</h3>
             <div className="metrics-content">
-              {/* FPS con barra de progreso */}
+              {/* FPS */}
               <div className="metric-item">
-                <div className="metric-header">
-                  <span className="metric-label">FPS</span>
-                  <span className="metric-value">{Math.round(stats.fps)}</span>
-                </div>
-                <div className="fps-progress-bar">
-                  <div 
-                    className="fps-progress-fill" 
-                    style={{ width: `${Math.min((stats.fps / 10) * 100, 100)}%` }}
-                  />
-                </div>
+                <span className="metric-label">FPS</span>
+                <span className="metric-value">{Math.round(stats.fps)}</span>
               </div>
 
               {/* Temperaturas */}
@@ -1277,7 +1269,6 @@ export default function ThermalViewer() {
             <div className="confirmation-modal-new">
               {/* Header */}
               <div className="confirmation-header-new">
-                <div className="confirmation-logo">⭐</div>
                 <div className="confirmation-header-text">
                   <h2>Resumen</h2>
                   <p>Revise las imágenes térmicas antes de continuar con el análisis</p>
